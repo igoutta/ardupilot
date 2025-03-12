@@ -1791,6 +1791,15 @@ void GCS_MAVLINK::send_message(enum ap_message id)
     pushed_ap_message_ids.set(id);
 }
 
+// Plane only enables follow when scripting is enabled:
+#if APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+#define AP_MAVLINK_FOLLOW_HANDLING_ENABLED (AP_SCRIPTING_ENABLED && AP_FOLLOW_ENABLED)
+#elif APM_BUILD_TYPE(APM_BUILD_Rover) || APM_BUILD_COPTER_OR_HELI
+#define AP_MAVLINK_FOLLOW_HANDLING_ENABLED AP_FOLLOW_ENABLED
+#else
+#define AP_MAVLINK_FOLLOW_HANDLING_ENABLED 0
+#endif
+
 void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
                                  const mavlink_message_t &msg)
 {
@@ -1827,6 +1836,16 @@ void GCS_MAVLINK::packetReceived(const mavlink_status_t &status,
         }
     }
 #endif // AP_SCRIPTING_ENABLED
+
+#if AP_MAVLINK_FOLLOW_HANDLING_ENABLED
+    {
+        AP_Follow *follow = AP_Follow::get_singleton();
+        if (follow != nullptr) {
+            follow->handle_msg(msg);
+        }
+    }
+#endif
+
     if (!accept_packet(status, msg)) {
         // e.g. enforce-sysid says we shouldn't look at this packet
         return;
@@ -3565,21 +3584,20 @@ MAV_RESULT GCS_MAVLINK::handle_flight_termination(const mavlink_command_int_t &p
 #endif
 }
 
-#if AP_RC_CHANNEL_ENABLED
+#if AP_RCPROTOCOL_ENABLED
 /*
   handle a R/C bind request (for spektrum)
  */
 MAV_RESULT GCS_MAVLINK::handle_START_RX_PAIR(const mavlink_command_int_t &packet)
 {
-    // initiate bind procedure. We accept the DSM type from either
+    // initiate bind procedure. We houls accept the DSM type from either
     // param1 or param2 due to a past mixup with what parameter is the
-    // right one
-    if (!RC_Channels::receiver_bind(packet.param2>0?packet.param2:packet.param1)) {
-        return MAV_RESULT_FAILED;
-    }
+    // right one: const int dsmMode = (packet.param2 > 0) ? packet.param2 : packet.param1;
+    AP::RC().start_bind();
+
     return MAV_RESULT_ACCEPTED;
 }
-#endif  // AP_RC_CHANNEL_ENABLED
+#endif  // AP_RCPROTOCOL_ENABLED
 
 uint64_t GCS_MAVLINK::timesync_receive_timestamp_ns() const
 {
@@ -5381,6 +5399,22 @@ MAV_RESULT GCS_MAVLINK::handle_do_set_safety_switch_state(const mavlink_command_
     }
 }
 
+#if AP_MAVLINK_FOLLOW_HANDLING_ENABLED
+MAV_RESULT GCS_MAVLINK::handle_command_do_follow(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
+{
+    AP_Follow *follow = AP_Follow::get_singleton();
+    if (follow == nullptr) {
+        return MAV_RESULT_UNSUPPORTED;
+    }
+
+    // param1: sysid of target to follow
+    if ((packet.param1 > 0) && (packet.param1 <= 255)) {
+        follow->set_target_sysid((uint8_t)packet.param1);
+        return MAV_RESULT_ACCEPTED;
+    }
+    return MAV_RESULT_DENIED;
+}
+#endif  // AP_MAVLINK_FOLLOW_HANDLING_ENABLED
 
 MAV_RESULT GCS_MAVLINK::handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
 {
@@ -5584,7 +5618,7 @@ MAV_RESULT GCS_MAVLINK::handle_command_int_packet(const mavlink_command_int_t &p
         return handle_command_set_ekf_source_set(packet);
 #endif
 
-#if AP_RC_CHANNEL_ENABLED
+#if AP_RCPROTOCOL_ENABLED
     case MAV_CMD_START_RX_PAIR:
         return handle_START_RX_PAIR(packet);
 #endif
@@ -5605,6 +5639,10 @@ MAV_RESULT GCS_MAVLINK::handle_command_int_packet(const mavlink_command_int_t &p
     case MAV_CMD_REQUEST_MESSAGE:
         return handle_command_request_message(packet);
 
+#if AP_MAVLINK_FOLLOW_HANDLING_ENABLED
+    case MAV_CMD_DO_FOLLOW:
+        return handle_command_do_follow(packet, msg);
+#endif
     }
 
     return MAV_RESULT_UNSUPPORTED;

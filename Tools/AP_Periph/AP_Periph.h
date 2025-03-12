@@ -53,12 +53,12 @@
 #endif
 #include <AP_Relay/AP_Relay.h>
 #if !AP_RELAY_ENABLED
-    #error "HAL_PERIPH_ENABLE_RELAY requires AP_RELAY_ENABLED"
+    #error "AP_PERIPH_RELAY_ENABLED requires AP_RELAY_ENABLED"
 #endif
 #endif
 
-#if defined(HAL_PERIPH_ENABLE_DEVICE_TEMPERATURE) && !AP_TEMPERATURE_SENSOR_ENABLED
-    #error "HAL_PERIPH_ENABLE_DEVICE_TEMPERATURE requires AP_TEMPERATURE_SENSOR_ENABLED"
+#if AP_PERIPH_DEVICE_TEMPERATURE_ENABLED && !AP_TEMPERATURE_SENSOR_ENABLED
+    #error "AP_PERIPH_DEVICE_TEMPERATURE_ENABLED requires AP_TEMPERATURE_SENSOR_ENABLED"
 #endif
 
 #include <AP_NMEA_Output/AP_NMEA_Output.h>
@@ -73,7 +73,7 @@
 
 #include "esc_apd_telem.h"
 
-#if defined(HAL_PERIPH_NEOPIXEL_COUNT_WITHOUT_NOTIFY) || defined(HAL_PERIPH_ENABLE_NCP5623_LED_WITHOUT_NOTIFY) || defined(HAL_PERIPH_ENABLE_NCP5623_BGR_LED_WITHOUT_NOTIFY) || defined(HAL_PERIPH_ENABLE_TOSHIBA_LED_WITHOUT_NOTIFY)
+#if defined(HAL_PERIPH_NEOPIXEL_COUNT_WITHOUT_NOTIFY) || AP_PERIPH_NCP5623_LED_WITHOUT_NOTIFY_ENABLED || AP_PERIPH_NCP5623_BGR_LED_WITHOUT_NOTIFY_ENABLED || AP_PERIPH_TOSHIBA_LED_WITHOUT_NOTIFY_ENABLED
 #define AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY
 #endif
 
@@ -81,11 +81,11 @@
     #if !AP_PERIPH_RC_OUT_ENABLED && !defined(HAL_PERIPH_NOTIFY_WITHOUT_RCOUT)
         #error "AP_PERIPH_NOTIFY_ENABLED requires AP_PERIPH_RC_OUT_ENABLED"
     #endif
-    #ifdef HAL_PERIPH_ENABLE_BUZZER_WITHOUT_NOTIFY
-        #error "You cannot enable AP_PERIPH_NOTIFY_ENABLED and HAL_PERIPH_ENABLE_BUZZER_WITHOUT_NOTIFY at the same time. Notify already includes it"
+    #if AP_PERIPH_BUZZER_WITHOUT_NOTIFY_ENABLED
+        #error "You cannot enable AP_PERIPH_NOTIFY_ENABLED and AP_PERIPH_BUZZER_WITHOUT_NOTIFY_ENABLED at the same time. Notify already includes it"
     #endif
     #ifdef AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY
-        #error "You cannot enable AP_PERIPH_NOTIFY_ENABLED and any HAL_PERIPH_ENABLE_<device>_LED_WITHOUT_NOTIFY at the same time. Notify already includes them all"
+        #error "You cannot enable AP_PERIPH_NOTIFY_ENABLED and any AP_PERIPH_<device>_LED_WITHOUT_NOTIFY_ENABLED at the same time. Notify already includes them all"
     #endif
     #ifdef HAL_PERIPH_NEOPIXEL_CHAN_WITHOUT_NOTIFY
         #error "You cannot use AP_PERIPH_NOTIFY_ENABLED and HAL_PERIPH_NEOPIXEL_CHAN_WITHOUT_NOTIFY at the same time. Notify already includes it. Set param OUTx_FUNCTION=120"
@@ -335,7 +335,7 @@ public:
     AP_KDECAN kdecan;
 #endif
     
-#ifdef HAL_PERIPH_ENABLE_ESC_APD
+#if AP_PERIPH_ESC_APD_ENABLED
     ESC_APD_Telem *apd_esc_telem[APD_ESC_INSTANCES];
     void apd_esc_telem_update();
 #endif
@@ -390,7 +390,7 @@ public:
     
 #if AP_TEMPERATURE_SENSOR_ENABLED
     AP_TemperatureSensor temperature_sensor;
-#ifdef HAL_PERIPH_ENABLE_DEVICE_TEMPERATURE
+#if AP_PERIPH_DEVICE_TEMPERATURE_ENABLED
     void temperature_sensor_update();
     uint32_t temperature_last_send_ms;
     uint8_t temperature_last_sent_index;

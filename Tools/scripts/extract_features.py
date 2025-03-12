@@ -145,6 +145,8 @@ class ExtractFeatures(object):
             ('AP_PROXIMITY_{type}_ENABLED', 'AP_Proximity_(?P<type>.*)::update',),
             ('AP_PROXIMITY_CYGBOT_ENABLED', 'AP_Proximity_Cygbot_D1::update',),
             ('AP_PROXIMITY_LIGHTWARE_{type}_ENABLED', 'AP_Proximity_LightWare(?P<type>.*)::update',),
+            ('AP_PROXIMITY_HEXSOONRADAR_ENABLED', 'AP_Proximity_MR72_CAN::update',),
+            ('AP_PROXIMITY_MR72_ENABLED', 'AP_Proximity_MR72_CAN::update',),
 
             ('HAL_PARACHUTE_ENABLED', 'AP_Parachute::update',),
             ('AP_FENCE_ENABLED', r'AC_Fence::check\b',),
@@ -275,6 +277,7 @@ class ExtractFeatures(object):
             ('HAL_ENABLE_DRONECAN_DRIVERS', r'AP_DroneCAN::init'),
             ('AP_BARO_PROBE_EXTERNAL_I2C_BUSES', r'AP_Baro::_probe_i2c_barometers'),
             ('AP_RSSI_ENABLED', r'AP_RSSI::init'),
+            ('AP_FOLLOW_ENABLED', 'AP_Follow::AP_Follow'),
 
             ('AP_ROVER_ADVANCED_FAILSAFE_ENABLED', r'Rover::afs_fs_check'),
             ('AP_COPTER_ADVANCED_FAILSAFE_ENABLED', r'Copter::afs_fs_check'),
@@ -506,7 +509,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(prog='extract_features.py', description='Extract ArduPilot features from binaries')
     parser.add_argument('firmware_file', help='firmware binary')
-    parser.add_argument('-nm', type=str, default="arm-none-eabi-nm", help='nm binary to use.')
+    parser.add_argument('--nm', type=str, default="arm-none-eabi-nm", help='nm binary to use.')
     args = parser.parse_args()
     # print(args.firmware_file, args.nm)
 
