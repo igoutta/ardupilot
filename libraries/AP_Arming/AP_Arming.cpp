@@ -373,11 +373,10 @@ bool AP_Arming::airspeed_checks(bool report)
             // not an airspeed capable vehicle
             return true;
         }
-        for (uint8_t i=0; i<AIRSPEED_MAX_SENSORS; i++) {
-            if (airspeed->enabled(i) && airspeed->use(i) && !airspeed->healthy(i)) {
-                check_failed(ARMING_CHECK_AIRSPEED, report, "Airspeed %d not healthy", i + 1);
-                return false;
-            }
+        char buffer[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN+1] {};
+        if (!airspeed->arming_checks(sizeof(buffer), buffer)) {
+            check_failed(ARMING_CHECK_AIRSPEED, report, "Airspeed: %s", buffer);
+            return false;
         }
     }
 
@@ -1793,6 +1792,7 @@ bool AP_Arming::arm(AP_Arming::Method method, const bool do_arming_checks)
 
     if ((!do_arming_checks && mandatory_checks(true)) || (pre_arm_checks(true) && arm_checks(method))) {
         armed = true;
+        last_arm_time_us = AP_HAL::micros64();
 
         _last_arm_method = method;
 
