@@ -525,7 +525,7 @@ void AP_Periph_FW::handle_arming_status(CanardInstance* canard_instance, CanardR
 
 
 
-#if defined(AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY) || AP_PERIPH_NOTIFY_ENABLED
+#if AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY || AP_PERIPH_NOTIFY_ENABLED
 void AP_Periph_FW::set_rgb_led(uint8_t red, uint8_t green, uint8_t blue)
 {
 #if AP_PERIPH_NOTIFY_ENABLED
@@ -625,7 +625,7 @@ void AP_Periph_FW::handle_lightscommand(CanardInstance* canard_instance, CanardR
         uint8_t blue = cmd.color.blue<<3U;
 #if AP_PERIPH_NOTIFY_ENABLED
         const int8_t brightness = notify.get_rgb_led_brightness_percent();
-#elif defined(AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY)
+#elif AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY
         const int8_t brightness = g.led_brightness;
 #endif
         if (brightness != 100 && brightness >= 0) {
@@ -858,7 +858,7 @@ void AP_Periph_FW::onTransferReceived(CanardInstance* canard_instance,
         break;
 #endif
 
-#if defined(AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY) || AP_PERIPH_NOTIFY_ENABLED
+#if AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY || AP_PERIPH_NOTIFY_ENABLED
     case UAVCAN_EQUIPMENT_INDICATION_LIGHTSCOMMAND_ID:
         handle_lightscommand(canard_instance, transfer);
         break;
@@ -958,7 +958,7 @@ bool AP_Periph_FW::shouldAcceptTransfer(const CanardInstance* canard_instance,
     case UAVCAN_EQUIPMENT_SAFETY_ARMINGSTATUS_ID:
         *out_data_type_signature = UAVCAN_EQUIPMENT_SAFETY_ARMINGSTATUS_SIGNATURE;
         return true;
-#if defined(AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY) || AP_PERIPH_NOTIFY_ENABLED
+#if AP_PERIPH_HAVE_LED_WITHOUT_NOTIFY || AP_PERIPH_NOTIFY_ENABLED
     case UAVCAN_EQUIPMENT_INDICATION_LIGHTSCOMMAND_ID:
         *out_data_type_signature = UAVCAN_EQUIPMENT_INDICATION_LIGHTSCOMMAND_SIGNATURE;
         return true;
@@ -1224,38 +1224,38 @@ void AP_Periph_FW::processTx(void)
 #if HAL_ENABLE_SENDING_STATS
 void AP_Periph_FW::update_rx_protocol_stats(int16_t res)
 {
-    switch (res) {
+    switch (-res) {
     case CANARD_OK:
         protocol_stats.rx_frames++;
         break;
-    case -CANARD_ERROR_OUT_OF_MEMORY:
+    case CANARD_ERROR_OUT_OF_MEMORY:
         protocol_stats.rx_error_oom++;
         break;
-    case -CANARD_ERROR_INTERNAL:
+    case CANARD_ERROR_INTERNAL:
         protocol_stats.rx_error_internal++;
         break;
-    case -CANARD_ERROR_RX_INCOMPATIBLE_PACKET:
+    case CANARD_ERROR_RX_INCOMPATIBLE_PACKET:
         protocol_stats.rx_ignored_not_wanted++;
         break;
-    case -CANARD_ERROR_RX_WRONG_ADDRESS:
+    case CANARD_ERROR_RX_WRONG_ADDRESS:
         protocol_stats.rx_ignored_wrong_address++;
         break;
-    case -CANARD_ERROR_RX_NOT_WANTED:
+    case CANARD_ERROR_RX_NOT_WANTED:
         protocol_stats.rx_ignored_not_wanted++;
         break;
-    case -CANARD_ERROR_RX_MISSED_START:
+    case CANARD_ERROR_RX_MISSED_START:
         protocol_stats.rx_error_missed_start++;
         break;
-    case -CANARD_ERROR_RX_WRONG_TOGGLE:
+    case CANARD_ERROR_RX_WRONG_TOGGLE:
         protocol_stats.rx_error_wrong_toggle++;
         break;
-    case -CANARD_ERROR_RX_UNEXPECTED_TID:
+    case CANARD_ERROR_RX_UNEXPECTED_TID:
         protocol_stats.rx_ignored_unexpected_tid++;
         break;
-    case -CANARD_ERROR_RX_SHORT_FRAME:
+    case CANARD_ERROR_RX_SHORT_FRAME:
         protocol_stats.rx_error_short_frame++;
         break;
-    case -CANARD_ERROR_RX_BAD_CRC:
+    case CANARD_ERROR_RX_BAD_CRC:
         protocol_stats.rx_error_bad_crc++;
         break;
     default:

@@ -69,6 +69,10 @@ class MAV_POS_TARGET_TYPE_MASK(enum.IntEnum):
     YAW_IGNORE = mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_IGNORE
     YAW_RATE_IGNORE = mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
     POS_ONLY   = VEL_IGNORE | ACC_IGNORE | YAW_IGNORE | YAW_RATE_IGNORE
+    ALT_ONLY   = (VEL_IGNORE | ACC_IGNORE | YAW_IGNORE | YAW_RATE_IGNORE |
+                  mavutil.mavlink.POSITION_TARGET_TYPEMASK_X_IGNORE |
+                  mavutil.mavlink.POSITION_TARGET_TYPEMASK_Y_IGNORE)
+    IGNORE_ALL = VEL_IGNORE | ACC_IGNORE | YAW_IGNORE | YAW_RATE_IGNORE | POS_IGNORE
     LAST_BYTE  = 0xF000
 
 
@@ -473,6 +477,8 @@ class WaitAndMaintain(object):
                  timeout=30,
                  epsilon=None,
                  comparator=None,
+                 fn=None,
+                 fn_interval=None,
                  ):
         self.test_suite = test_suite
         self.minimum_duration = minimum_duration
@@ -482,6 +488,10 @@ class WaitAndMaintain(object):
         self.last_progress_print = 0
         self.progress_print_interval = progress_print_interval
         self.comparator = comparator
+
+        self.fn = fn
+        self.fn_interval = fn_interval
+        self.last_fn_run_time = 0
 
     def run(self):
         self.announce_test_start()
@@ -498,6 +508,12 @@ class WaitAndMaintain(object):
             if now - tstart > self.timeout:
                 self.print_failure_text(now, current_value)
                 raise self.timeoutexception()
+
+            # call supplied function if appropriate:
+            if (self.fn is not None and
+                    now - self.last_fn_run_time > self.fn_interval):
+                self.fn()
+                self.last_fn_run_time = now
 
             # handle the case where we are are achieving our value:
             if self.validate_value(current_value):
@@ -1527,7 +1543,7 @@ class FRSkySPort(FRSky):
             0x020F: "CURR", # current dA
             0x011F: "VSPD", # vertical speed cm/s
             0x021F: "VFAS", # battery 1 voltage cV
-            # 0x800: "GPS", ## comments as duplicated dictrionary key
+            # 0x800: "GPS", ## comments as duplicated dictionary key
             0x050E: "RPM1",
 
             0x34: "DOWNLINK1_ID",
@@ -2696,17 +2712,6 @@ class TestSuite(ABC):
             "SIM_MAG1_OFS_X",
             "SIM_MAG1_OFS_Y",
             "SIM_MAG1_OFS_Z",
-            "SIM_PARA_ENABLE",
-            "SIM_PARA_PIN",
-            "SIM_SHIP_DSIZE",
-            "SIM_SHIP_ENABLE",
-            "SIM_SHIP_OFS_X",
-            "SIM_SHIP_OFS_Y",
-            "SIM_SHIP_OFS_Z",
-            "SIM_SHIP_PSIZE",
-            "SIM_SHIP_SPEED",
-            "SIM_SHIP_SYSID",
-            "SIM_TA_ENABLE",
             "SIM_VIB_FREQ_X",
             "SIM_VIB_FREQ_Y",
             "SIM_VIB_FREQ_Z",
@@ -3818,7 +3823,7 @@ class TestSuite(ABC):
                                 timeout=2)
         if m is not None:
             raise NotAchievedException("Received extra LOG_ENTRY?!")
-        # shouldbe: m = self.assert_not_receive_message('LOG_ENTRY', timeout=2)
+        # should be: m = self.assert_not_receive_message('LOG_ENTRY', timeout=2)
 
         return logs
 
@@ -4223,6 +4228,14 @@ class TestSuite(ABC):
             count += 1
 
     def create_simple_relhome_mission(self, items_in, target_system=1, target_component=1):
+        return self.create_simple_relloc_mission(
+            self.home_position_as_mav_location(),
+            items_in,
+            target_system=target_system,
+            target_component=target_component,
+        )
+
+    def create_simple_relloc_mission(self, loc, items_in, target_system=1, target_component=1):
         '''takes a list of (type, n, e, alt) items.  Creates a mission in
         absolute frame using alt as relative-to-home and n and e as
         offsets in metres from home'''
@@ -4247,9 +4260,9 @@ class TestSuite(ABC):
             lat = 0
             lng = 0
             if n != 0 or e != 0:
-                loc = self.home_relative_loc_ne(n, e)
-                lat = loc.lat
-                lng = loc.lng
+                relloc = self.offset_location_ne(loc, n, e)
+                lat = relloc.lat
+                lng = relloc.lng
             frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
             if not self.ardupilot_stores_frame_for_cmd(t):
                 frame = mavutil.mavlink.MAV_FRAME_GLOBAL
@@ -4262,6 +4275,14 @@ class TestSuite(ABC):
 
     def upload_simple_relhome_mission(self, items, target_system=1, target_component=1):
         mission = self.create_simple_relhome_mission(
+            items,
+            target_system=target_system,
+            target_component=target_component)
+        self.check_mission_upload_download(mission)
+
+    def upload_simple_relloc_mission(self, loc, items, target_system=1, target_component=1):
+        mission = self.create_simple_relloc_mission(
+            loc,
             items,
             target_system=target_system,
             target_component=target_component)
@@ -4301,7 +4322,7 @@ class TestSuite(ABC):
         self.assert_mission_count(0)
 
     def log_list(self):
-        '''return a list of log files present in POSIX-style loging dir'''
+        '''return a list of log files present in POSIX-style logging dir'''
         ret = sorted(glob.glob("logs/00*.BIN"))
         self.progress("log list: %s" % str(ret))
         return ret
@@ -4368,12 +4389,28 @@ class TestSuite(ABC):
             enum_name = m.fieldenums_by_name.get(fieldname, None)
             if enum_name is not None:
                 enum = mavutil.mavlink.enums[enum_name]
-                if value not in enum:
-                    raise ValueError("Expected value %s not in enum %s" % (value, enum_name))
-                if got not in enum:
-                    raise ValueError("Received value %s not in enum %s" % (value, enum_name))
-                value_string = "%s (%s)" % (value, enum[value].name)
-                got_string = "%s (%s)" % (got, enum[got].name)
+                if getattr(enum, "bitmask", None):
+                    value_strings = []
+                    value_copy = value
+                    shift_value = 1
+                    while value_copy != 0:
+                        if value_copy & 0x1:
+                            value_strings.append(enum[shift_value].name)
+                        else:
+                            value_strings.append("!" + enum[shift_value].name)
+                        shift_value += 1
+                        value_copy = value_copy >> 1
+                    value_string = f"{value_string} {'|'.join(value_strings)}"
+                elif enum_name != 'AIRSPEED_SENSOR_FLAGS':
+                    # once the ".bitmask" attribute on enumerations
+                    # becomes uniquitous the check the
+                    # AIRSPEED_SENSOR_FLAGS can be removed.
+                    if value not in enum:
+                        raise ValueError(f"Expected value {value} not in enum {enum}")
+                    if got not in enum:
+                        raise ValueError(f"Received value {got} not in enum {enum}")
+                    value_string = f"{value} ({enum[value].name})"
+                    got_string = f"{got} ({enum[got].name})"
 
             if not self.message_has_field_values_field_values_equal(
                     fieldname, value, got, epsilon=epsilon
@@ -4671,7 +4708,7 @@ class TestSuite(ABC):
         #  print(f"{m_type} OK")
 
     def LoggingFormat(self):
-        '''ensure formats are emmitted appropriately'''
+        '''ensure formats are emitted appropriately'''
 
         self.context_push()
         self.set_parameter('LOG_FILE_DSRMROT', 1)
@@ -5682,7 +5719,7 @@ class TestSuite(ABC):
         self.run_cmd(mavutil.mavlink.MAV_CMD_DO_SET_SERVO, p1=chan, p2=pwm)
 
     def location_offset_ne(self, location, north, east):
-        '''move location in metres'''
+        '''move location in metres.  You probably wat offset_location_ne'''
         print("old: %f %f" % (location.lat, location.lng))
         (lat, lng) = mp_util.gps_offset(location.lat, location.lng, east, north)
         location.lat = lat
@@ -6252,14 +6289,15 @@ class TestSuite(ABC):
             return
         raise ValueError("Failed to set parameters (%s)" % want)
 
-    def check_parameter_value(self, name, expected_value, max_error_percent):
+    # FIXME: modify assert_parameter_value to take epsilon_pct instead:
+    def assert_parameter_value_pct(self, name, expected_value, max_error_percent):
         value = self.get_parameter_direct(name, verbose=False)
 
         # Convert to ratio and find limits
         error_ratio = max_error_percent / 100
         limits = [expected_value * (1 + error_ratio), expected_value * (1 - error_ratio)]
 
-        # Ensure that min and max are always the corret way round
+        # Ensure that min and max are always the correct way round
         upper_limit = max(limits)
         lower_limit = min(limits)
 
@@ -6270,7 +6308,7 @@ class TestSuite(ABC):
 
         # Check value is within limits
         if (value > upper_limit) or (value < lower_limit):
-            raise ValueError("%s expected %f ± %f%% (%f to %f) got %s with %f%% error" % (
+            raise ValueError("%s expected %f +/- %f%% (%f to %f) got %s with %f%% error" % (
                 name,
                 expected_value,
                 max_error_percent,
@@ -6881,7 +6919,7 @@ class TestSuite(ABC):
     def assert_no_capability(self, capability):
         if self.capable(capability):
             name = mavutil.mavlink.enums["MAV_PROTOCOL_CAPABILITY"][capability].name
-            raise NotAchievedException("AutoPilot has feature %s (when it shouln't)" % (name,))
+            raise NotAchievedException("AutoPilot has feature %s (when it shouldn't)" % (name,))
 
     def get_autopilot_capabilities(self):
         # Cannot use run_cmd otherwise the respond is lost during the wait for ACK
@@ -7383,12 +7421,14 @@ class TestSuite(ABC):
             **kwargs
         )
 
-    def wait_roll(self, roll, accuracy, timeout=30, **kwargs):
+    def wait_roll(self, roll, accuracy, timeout=30, absolute_value=False, **kwargs):
         """Wait for a given roll in degrees."""
         def get_roll(timeout2):
             msg = self.assert_receive_message('ATTITUDE', timeout=timeout2)
             p = math.degrees(msg.pitch)
             r = math.degrees(msg.roll)
+            if absolute_value:
+                r = abs(r)
             self.progress("Roll %d Pitch %d" % (r, p))
             return r
 
@@ -8533,7 +8573,7 @@ Also, ignores heartbeats not from our target system'''
         # Statustexts are often triggered by something we've just
         # done, so we have to be careful not to read any traffic that
         # isn't checked for being our statustext.  That doesn't work
-        # well with getting the curent simulation time (which requires
+        # well with getting the current simulation time (which requires
         # a new SYSTEM_TIME message), so we install a message hook
         # which checks all incoming messages.
         self.progress("Waiting for text : %s" % text.lower())
@@ -9175,7 +9215,7 @@ Also, ignores heartbeats not from our target system'''
         return self.use_map
 
     def init(self):
-        """Initilialize autotest feature."""
+        """Initialize autotest feature."""
         self.mavproxy_logfile = self.open_mavproxy_logfile()
 
         if self.frame is None:
@@ -11254,14 +11294,14 @@ Also, ignores heartbeats not from our target system'''
         # non strict string matching because of catching text issue....
         self.context_collect('STATUSTEXT')
         self.set_rc(9, 1000)
-        self.wait_text("Gripper load releas", check_context=True)
+        self.wait_text("Gripper load releas(ed|ing)", regex=True, check_context=True)
         self.progress("Grabbing load")
         self.set_rc(9, 2000)
         self.wait_text("Gripper load grabb", check_context=True)
         self.context_clear_collection('STATUSTEXT')
         self.progress("Releasing load")
         self.set_rc(9, 1000)
-        self.wait_text("Gripper load releas", check_context=True)
+        self.wait_text("Gripper load releas(ed|ing)", regex=True, check_context=True)
         self.progress("Grabbing load")
         self.set_rc(9, 2000)
         self.wait_text("Gripper load grabb", check_context=True)
@@ -11274,7 +11314,7 @@ Also, ignores heartbeats not from our target system'''
             p1=1,
             p2=mavutil.mavlink.GRIPPER_ACTION_RELEASE
         )
-        self.wait_text("Gripper load releas", check_context=True)
+        self.wait_text("Gripper load releas(ed|ing)", check_context=True, regex=True)
         self.progress("Grabbing load")
         self.run_cmd(
             mavutil.mavlink.MAV_CMD_DO_GRIPPER,
@@ -11290,7 +11330,7 @@ Also, ignores heartbeats not from our target system'''
             p1=1,
             p2=mavutil.mavlink.GRIPPER_ACTION_RELEASE
         )
-        self.wait_text("Gripper load releas", check_context=True)
+        self.wait_text("Gripper load releas(ed|ing)", regex=True, check_context=True)
 
         self.progress("Grabbing load")
         self.run_cmd_int(
@@ -11500,7 +11540,7 @@ Also, ignores heartbeats not from our target system'''
             testpos(self, targetpos, test_alt, frame_name, frame)
 
             if test_heading:
-                self.start_subtest("Testing Yaw targetting in %s" % frame_name)
+                self.start_subtest("Testing Yaw targeting in %s" % frame_name)
                 self.progress("Changing Latitude and Heading")
                 targetpos.lat += 0.0001
                 if test_alt:
@@ -11568,7 +11608,7 @@ Also, ignores heartbeats not from our target system'''
                 self.wait_heading(0, minimum_duration=5, timeout=timeout)
 
             if test_yaw_rate:
-                self.start_subtest("Testing Yaw Rate targetting in %s" % frame_name)
+                self.start_subtest("Testing Yaw Rate targeting in %s" % frame_name)
 
                 def send_yaw_rate(rate, target=None):
                     self.mav.mav.set_position_target_global_int_send(
@@ -11831,7 +11871,7 @@ Also, ignores heartbeats not from our target system'''
             )
 
             if test_heading:
-                self.start_subtest("Testing Yaw targetting in %s" % frame_name)
+                self.start_subtest("Testing Yaw targeting in %s" % frame_name)
 
                 def send_yaw_target(yaw, mav_frame):
                     self.mav.mav.set_position_target_global_int_send(
@@ -11928,7 +11968,7 @@ Also, ignores heartbeats not from our target system'''
                 )
 
             if test_yaw_rate:
-                self.start_subtest("Testing Yaw Rate targetting in %s" % frame_name)
+                self.start_subtest("Testing Yaw Rate targeting in %s" % frame_name)
 
                 def send_yaw_rate(rate, mav_frame):
                     self.mav.mav.set_position_target_global_int_send(
@@ -12173,7 +12213,7 @@ one specified in the vehicle constructor)'''
 
     def wait_for_mode_switch_poll(self):
         '''look for a transition from boot-up-mode (e.g. the flightmode
-specificied in Copter's constructor) to the one specified by the mode
+specified in Copter's constructor) to the one specified by the mode
 switch value'''
         want = self.initial_mode_switch_mode()
         if want is None:
@@ -12492,7 +12532,7 @@ switch value'''
             mav = self.mav
         m = mav.recv_match(type=message, blocking=True, timeout=timeout)
         if m is not None:
-            raise PreconditionFailedException("Receiving %s messags" % message)
+            raise PreconditionFailedException("Receiving %s messages" % message)
 
     def PIDTuning(self):
         '''Test PID Tuning'''
@@ -12513,7 +12553,7 @@ switch value'''
                 self.assert_no_capability(mavutil.mavlink.MAV_PROTOCOL_CAPABILITY_FLIGHT_TERMINATION)
             self.set_parameters({
                 "AFS_ENABLE": 1,
-                "SYSID_MYGCS": self.mav.source_system,
+                "MAV_GCS_SYSID": self.mav.source_system,
             })
             self.drain_mav()
             self.assert_capability(mavutil.mavlink.MAV_PROTOCOL_CAPABILITY_FLIGHT_TERMINATION)
@@ -12582,6 +12622,28 @@ switch value'''
             pass
         if ex is not None:
             raise ex
+
+    def AdvancedFailsafeBadBaro(self):
+        '''ensure GPS can be used as a fallback in case of baro dying'''
+        self.set_parameters({
+            "AFS_ENABLE": 1,
+            "MAV_GCS_SYSID": self.mav.source_system,
+            "AFS_AMSL_LIMIT": 1000,
+            "AFS_QNH_PRESSURE": 1000,
+            "AFS_AMSL_ERR_GPS": 10,
+        })
+        self.wait_ready_to_arm()
+        self.start_subtest("Ensuring breaking baros doesn't terminate")
+        self.set_parameters({
+            "SIM_BARO_DISABLE": 1,
+            "SIM_BAR2_DISABLE": 1,
+        })
+        self.delay_sim_time(10)
+        self.start_subtest("Ensuring breaking GPS does now terminate")
+        self.set_parameters({
+            "SIM_GPS1_ENABLE": 0,
+        })
+        self.wait_statustext("Terminating due to fence breach")
 
     def drain_mav_seconds(self, seconds):
         tstart = self.get_sim_time_cached()
@@ -13553,7 +13615,7 @@ switch value'''
             condition="BATTERY_STATUS.id==0"
         )
         battery_status_voltage_v = batt.voltages[0] * 0.001 # mV -> V
-        self.progress("BATTERY_STATUS volatge==%f frsky==%f" % (battery_status_voltage_v, voltage_v))
+        self.progress("BATTERY_STATUS voltage==%f frsky==%f" % (battery_status_voltage_v, voltage_v))
         if self.compare_number_percent(battery_status_voltage_v, voltage_v, 10):
             return True
         return False

@@ -5,9 +5,10 @@ import re
 import sys, os
 import fnmatch
 import platform
+import glob
 
 import waflib
-from waflib import Utils
+from waflib import Utils, Context
 from waflib.Configure import conf
 import json
 _board_classes = {}
@@ -173,6 +174,17 @@ class Board:
                 env.CXXFLAGS += ['-D%s=0' % opt.define]
                 cfg.msg("Enabled %s" % opt.label, 'no', color='YELLOW')
 
+        # support embedding lua drivers and applets
+        driver_list = glob.glob(os.path.join(Context.run_dir, "libraries/AP_Scripting/drivers/*.lua"))
+        applet_list = glob.glob(os.path.join(Context.run_dir, "libraries/AP_Scripting/applets/*.lua"))
+        for d in driver_list + applet_list:
+            bname = os.path.basename(d)
+            embed_name = bname[:-4]
+            embed_option = f"embed-{embed_name}".replace("-","_")
+            if getattr(cfg.options, embed_option, False):
+                env.ROMFS_FILES += [(f'scripts/{bname}', d)]
+                cfg.msg(f"Embedded {bname}", 'yes', color='GREEN')
+
         if cfg.options.disable_networking:
             env.CXXFLAGS += ['-DAP_NETWORKING_ENABLED=0']
 
@@ -277,7 +289,13 @@ class Board:
             want_version = cfg.options.assert_cc_version
             if have_version != want_version:
                 cfg.fatal("cc version mismatch: %s should be %s" % (have_version, want_version))
-        
+
+        # ensure that if you are using clang you're using it for both
+        # C and C++!
+        if (("clang" in cfg.env.COMPILER_CC and "clang" not in cfg.env.COMPILER_CXX) or
+            ("clang" not in cfg.env.COMPILER_CC and "clang" in cfg.env.COMPILER_CXX)):
+            cfg.fatal("Compiler mismatch; set CC and CXX to matching compilers (eg. CXX=clang++-19 CC=clang-19")
+
         if 'clang' in cfg.env.COMPILER_CC:
             env.CFLAGS += [
                 '-fcolor-diagnostics',
@@ -293,14 +311,6 @@ class Board:
             env.CFLAGS += [
                 '-Wno-format-contains-nul',
                 '-fsingle-precision-constant', # force const vals to be float , not double. so 100.0 means 100.0f
-            ]
-            if self.cc_version_gte(cfg, 7, 4):
-                env.CXXFLAGS += [
-                    '-Werror=implicit-fallthrough',
-                ]
-            env.CXXFLAGS += [
-                '-fsingle-precision-constant',
-                '-Wno-psabi',
             ]
 
         if cfg.env.DEBUG:
@@ -428,7 +438,9 @@ class Board:
         else:
             env.CXXFLAGS += [
                 '-Wno-format-contains-nul',
-                '-Werror=unused-but-set-variable'
+                '-Werror=unused-but-set-variable',
+                '-fsingle-precision-constant',
+                '-Wno-psabi',
             ]
             if self.cc_version_gte(cfg, 5, 2):
                 env.CXXFLAGS += [
@@ -526,6 +538,14 @@ class Board:
             env.CXXFLAGS += ['-DHAL_WITH_EKF_DOUBLE=0']
 
         if cfg.options.consistent_builds:
+            # if symbols are renamed we don't want them to affect the output:
+            env.CXXFLAGS += ['-fno-rtti']
+            env.CFLAGS += ['-fno-rtti']
+            # stop including a unique ID in the headers.  More useful
+            # when trying to find binary differences as the build-id
+            # appears to be a hash of the output products
+            # (ie. identical for identical compiler output):
+            env.LDFLAGS += ['-Wl,--build-id=bob']
             # squash all line numbers to be the number 17
             env.CXXFLAGS += [
                 "-D__AP_LINE__=17",
@@ -582,15 +602,15 @@ class Board:
 Board = BoardMeta('Board', Board.__bases__, dict(Board.__dict__))
 
 def add_dynamic_boards_chibios():
-    '''add boards based on existance of hwdef.dat in subdirectories for ChibiOS'''
+    '''add boards based on existence of hwdef.dat in subdirectories for ChibiOS'''
     add_dynamic_boards_from_hwdef_dir(chibios, 'libraries/AP_HAL_ChibiOS/hwdef')
 
 def add_dynamic_boards_linux():
-    '''add boards based on existance of hwdef.dat in subdirectories for '''
+    '''add boards based on existence of hwdef.dat in subdirectories for '''
     add_dynamic_boards_from_hwdef_dir(linux, 'libraries/AP_HAL_Linux/hwdef')
 
 def add_dynamic_boards_from_hwdef_dir(base_type, hwdef_dir):
-    '''add boards based on existance of hwdef.dat in subdirectory'''
+    '''add boards based on existence of hwdef.dat in subdirectory'''
     dirname, dirlist, filenames = next(os.walk(hwdef_dir))
     for d in dirlist:
         if d in _board_classes.keys():
@@ -600,7 +620,7 @@ def add_dynamic_boards_from_hwdef_dir(base_type, hwdef_dir):
             newclass = type(d, (base_type,), {'name': d})
 
 def add_dynamic_boards_esp32():
-    '''add boards based on existance of hwdef.dat in subdirectories for ESP32'''
+    '''add boards based on existence of hwdef.dat in subdirectories for ESP32'''
     dirname, dirlist, filenames = next(os.walk('libraries/AP_HAL_ESP32/hwdef'))
     for d in dirlist:
         if d in _board_classes.keys():
@@ -624,7 +644,7 @@ def is_board_based(board, cls):
     return issubclass(_board_classes[board], cls)
 
 def get_ap_periph_boards():
-    '''Add AP_Periph boards based on existance of periph keywork in hwdef.dat or board name'''
+    '''Add AP_Periph boards based on existence of periph keyword in hwdef.dat or board name'''
     list_ap = [s for s in list(_board_classes.keys()) if "periph" in s]
     dirname, dirlist, filenames = next(os.walk('libraries/AP_HAL_ChibiOS/hwdef'))
     for d in dirlist:

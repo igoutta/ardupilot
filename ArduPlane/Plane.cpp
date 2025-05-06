@@ -351,9 +351,6 @@ void Plane::one_second_loop()
                                   (float)((aparm.airspeed_max - aparm.airspeed_min)/2));
     }
 
-    // sync MAVLink system ID
-    mavlink_system.sysid = g.sysid_this_mav;
-
     AP::srv().enable_aux_servos();
 
     // update notify flags
@@ -558,7 +555,23 @@ void Plane::set_flight_stage(AP_FixedWing::FlightStage fs)
         return;
     }
 
-    landing.handle_flight_stage_change(fs == AP_FixedWing::FlightStage::LAND);
+    const bool is_landing = (fs == AP_FixedWing::FlightStage::LAND);
+
+    landing.handle_flight_stage_change(is_landing);
+
+#if AP_LANDINGGEAR_ENABLED
+    if (is_landing) {
+        plane.g2.landing_gear.deploy_for_landing();
+    }
+
+    const bool is_takeoff_complete = (flight_stage == AP_FixedWing::FlightStage::TAKEOFF &&
+                                      fs == AP_FixedWing::FlightStage::NORMAL);
+    if (is_takeoff_complete &&
+        arming.is_armed_and_safety_off() &&
+        is_flying()) {
+            g2.landing_gear.retract_after_takeoff();
+    }
+#endif
 
     if (fs == AP_FixedWing::FlightStage::ABORT_LANDING) {
         gcs().send_text(MAV_SEVERITY_NOTICE, "Landing aborted, climbing to %dm",
@@ -824,7 +837,7 @@ bool Plane::get_wp_distance_m(float &distance) const
     }
 #if HAL_QUADPLANE_ENABLED
     if (quadplane.in_vtol_mode()) {
-        distance = quadplane.using_wp_nav() ? quadplane.wp_nav->get_wp_distance_to_destination() * 0.01 : 0;
+        distance = quadplane.using_wp_nav() ? quadplane.wp_nav->get_wp_distance_to_destination_cm() * 0.01 : 0;
         return true;
     }
 #endif
@@ -840,7 +853,7 @@ bool Plane::get_wp_bearing_deg(float &bearing) const
     }
 #if HAL_QUADPLANE_ENABLED
     if (quadplane.in_vtol_mode()) {
-        bearing = quadplane.using_wp_nav() ? quadplane.wp_nav->get_wp_bearing_to_destination() : 0;
+        bearing = quadplane.using_wp_nav() ? quadplane.wp_nav->get_wp_bearing_to_destination_cd() : 0;
         return true;
     }
 #endif
@@ -869,15 +882,15 @@ bool Plane::get_wp_crosstrack_error_m(float &xtrack_error) const
 bool Plane::set_target_location(const Location &target_loc)
 {
     Location loc{target_loc};
+    fix_terrain_WP(loc, __LINE__);
 
     if (plane.control_mode != &plane.mode_guided) {
         // only accept position updates when in GUIDED mode
         return false;
     }
     // add home alt if needed
-    if (loc.relative_alt && !loc.terrain_alt) {
-        loc.alt += plane.home.alt;
-        loc.relative_alt = 0;
+    if (!loc.terrain_alt) {
+        loc.change_alt_frame(Location::AltFrame::ABSOLUTE);
     }
     plane.set_guided_WP(loc);
     return true;
@@ -924,6 +937,8 @@ bool Plane::update_target_location(const Location &old_loc, const Location &new_
         return false;
     }
     next_WP_loc = new_loc;
+
+    fix_terrain_WP(next_WP_loc, __LINE__);
 
 #if HAL_QUADPLANE_ENABLED
     if (control_mode == &mode_qland || control_mode == &mode_qloiter) {
