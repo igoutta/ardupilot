@@ -24,7 +24,7 @@ else
 fi
 
 # Required Packages
-BASE_PKGS="base-devel ccache git gsfonts tk wget gcc grep"
+BASE_PKGS="base-devel ccache git gsfonts tk wget gcc grep tar"
 SITL_PKGS="python-pip python-setuptools python-wheel python-numpy python-scipy opencv python-wxpython"
 PX4_PKGS="lib32-glibc zip zlib ncurses"
 
