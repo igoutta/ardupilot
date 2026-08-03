@@ -55,12 +55,16 @@ void AP_AHRS_NavEKF2::update()
     // check the current primary core; if it has changed then assume
     // our attitude is reset:
     const int8_t primary_core = EKF2.getPrimaryCoreIndex();
-    if (old_primary_core != primary_core) {
-        old_primary_core = primary_core;
-        attitude_reset_count++;
+    if (attitude_reset_tracker.update(primary_core)) {
         LOGGER_WRITE_ERROR(LogErrorSubsystem::EKF_PRIMARY, LogErrorCode(primary_core));
         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "EKF2 primary changed:%d", (unsigned)primary_core);
     }
+
+    yaw_reset_tracker.update(EKF2.getYawResetCount());
+
+    position_NE_reset_tracker.update(EKF2.getPosNorthEastResetCount());
+
+    position_D_reset_tracker.update(EKF2.getPosDownResetCount());
 }
 
 void AP_AHRS_NavEKF2::get_results(AP_AHRS_Backend::Estimates &results)
@@ -112,7 +116,9 @@ void AP_AHRS_NavEKF2::get_results(AP_AHRS_Backend::Estimates &results)
 
     results.attitude_valid = started;
 
-    results.attitude_reset_count = attitude_reset_count;
+    results.attitude_reset_count = attitude_reset_tracker.count();
+
+    results.yaw_reset_count = yaw_reset_tracker.count();
 
     /*
      * acceleration estimates
@@ -157,7 +163,10 @@ void AP_AHRS_NavEKF2::get_results(AP_AHRS_Backend::Estimates &results)
 
     // origin-relative position:
     results.position_NE_valid = EKF2.getPosNE(results.position_NE);
+    results.position_NE_reset_count = position_NE_reset_tracker.count();
+
     results.position_D_valid = EKF2.getPosD(results.position_D);
+    results.position_D_reset_count = position_D_reset_tracker.count();
 
     results.hagl_valid = EKF2.getHAGL(results.hagl);
 

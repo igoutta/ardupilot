@@ -1460,6 +1460,7 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
     case MAV_CMD_SET_CAMERA_FOCUS:
         cmd.content.set_camera_focus.focus_type = packet.param1;
         cmd.content.set_camera_focus.focus_value = packet.param2;
+        cmd.content.set_camera_focus.camera_id = packet.param3;
         break;
 
     case MAV_CMD_SET_CAMERA_SOURCE:
@@ -1993,6 +1994,7 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
     case MAV_CMD_SET_CAMERA_FOCUS:
         packet.param1 = cmd.content.set_camera_focus.focus_type;
         packet.param2 = cmd.content.set_camera_focus.focus_value;
+        packet.param3 = cmd.content.set_camera_focus.camera_id;
         break;
 
     case MAV_CMD_SET_CAMERA_SOURCE:
@@ -3222,9 +3224,9 @@ AP_Mission *AP_Mission::_singleton;
 namespace AP
 {
 
-AP_Mission *mission()
+AP_Mission &mission()
 {
-    return AP_Mission::get_singleton();
+    return *(AP_Mission::get_singleton());
 }
 
 }

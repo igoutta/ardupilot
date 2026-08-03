@@ -151,6 +151,10 @@
 #include <AC_CustomControl/AC_CustomControl.h>                  // Custom control library
 #endif
 
+#if MODE_BRAKE_ENABLED && !MODE_ALTHOLD_ENABLED
+  #error Brake mode requires AltHold; disable MODE_BRAKE_ENABLED or enable MODE_ALTHOLD_ENABLED
+#endif
+
 #if AP_AVOIDANCE_ENABLED && !AP_FENCE_ENABLED
   #error AC_Avoidance relies on AP_FENCE_ENABLED which is disabled
 #endif
@@ -310,8 +314,8 @@ private:
 #endif
 
 
-    // system time in milliseconds of last recorded yaw reset from ekf
-    uint32_t ekfYawReset_ms;
+    // old value of counter which increments when our yaw estimate is reset
+    uint16_t ahrs_yaw_reset_count;
     // old value of counter which increments when our attitude estimate is reset
     uint16_t attitude_reset_count;
 
@@ -1031,7 +1035,9 @@ private:
     ModeAcro mode_acro;
 #endif
 #endif
+#if MODE_ALTHOLD_ENABLED
     ModeAltHold mode_althold;
+#endif
 #if MODE_AUTO_ENABLED
     ModeAuto mode_auto;
 #endif

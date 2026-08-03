@@ -85,6 +85,7 @@ public:
         Matrix3f dcm_matrix;
         Quaternion quaternion;
         uint16_t attitude_reset_count;  // counter incremented each time a sudden shift happens in attitude
+        uint16_t yaw_reset_count;  // incremented when a sudden shift happens in yaw
 
         // backends must always return the result in the vehicle body
         // frame.  A backend using the autopilot sensors will need to
@@ -158,8 +159,11 @@ public:
         // origin-relative position:
         Vector2p position_NE;
         bool position_NE_valid;  // true if position_NE is valid
+        uint16_t position_NE_reset_count;  // incremented when a sudden shift happens in position
+
         postype_t position_D;
         bool position_D_valid;   // true if position_D is valid
+        uint16_t position_D_reset_count;  // incremented when a sudden shift happens in position (down)
 
         bool get_hagl(float &height) const WARN_IF_UNUSED {
             height = hagl;
@@ -301,30 +305,6 @@ public:
     // return true if we will use compass for yaw
     virtual bool use_compass(void) = 0;
 
-    // return the amount of yaw angle change due to the last yaw angle reset in radians
-    // returns the time of the last yaw angle reset or 0 if no reset has ever occurred
-    virtual uint32_t getLastYawResetAngle(float &yawAng) {
-        return 0;
-    };
-
-    // return the amount of NE position change in metres due to the last reset
-    // returns the time of the last reset or 0 if no reset has ever occurred
-    virtual uint32_t getLastPosNorthEastReset(Vector2f &pos) WARN_IF_UNUSED {
-        return 0;
-    };
-
-    // return the amount of NE velocity change in metres/sec due to the last reset
-    // returns the time of the last reset or 0 if no reset has ever occurred
-    virtual uint32_t getLastVelNorthEastReset(Vector2f &vel) const WARN_IF_UNUSED {
-        return 0;
-    };
-
-    // return the amount of vertical position change due to the last reset in meters
-    // returns the time of the last reset or 0 if no reset has ever occurred
-    virtual uint32_t getLastPosDownReset(float &posDelta) WARN_IF_UNUSED {
-        return 0;
-    };
-
     // Resets the baro so that it reads zero at the current height
     // Resets the EKF height to zero
     // Adjusts the EKf origin height so that the EKF height + origin height is the same as before
@@ -337,4 +317,35 @@ public:
     }
 
     virtual void get_control_limits(float &ekfGndSpdLimit, float &controlScaleXY) const = 0;
+};
+
+// Converts an upstream "something changed" key (an EKF reset
+// count or timestamp, or another counter's count) into a monotonic
+// local count.  KeyT is the upstream key type.
+template <typename KeyT>
+class AP_AHRS_ResetCounter {
+public:
+    // bump count if the upstream key changed.  Returns true if a
+    // reset was recorded.
+    bool update(KeyT new_key) {
+        if (new_key == last_key) {
+            return false;
+        }
+        fill(new_key);
+        return true;
+    }
+
+    // unconditionally record a reset, re-seating the key so the next
+    // update() doesn't double-count.  Used when the active estimator
+    // changes.
+    void fill(KeyT new_key) {
+        last_key = new_key;
+        reset_count++;
+    }
+
+    uint16_t count() const { return reset_count; }
+
+private:
+    KeyT last_key;
+    uint16_t reset_count;
 };

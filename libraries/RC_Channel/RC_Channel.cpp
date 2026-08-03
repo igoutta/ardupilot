@@ -704,6 +704,7 @@ void RC_Channel::init_aux_function(const AUX_FUNC ch_option, const AuxSwitchPos 
 #if AP_GRIPPER_ENABLED
     case AUX_FUNC::GRIPPER:
 #endif
+#if AP_LANDINGGEAR_ENABLED
     case AUX_FUNC::LANDING_GEAR:
 #endif
     case AUX_FUNC::LOST_VEHICLE_SOUND:
@@ -796,6 +797,7 @@ void RC_Channel::init_aux_function(const AUX_FUNC ch_option, const AuxSwitchPos 
 #if AP_GPS_ENABLED
     case AUX_FUNC::GPS_DISABLE:
     case AUX_FUNC::GPS_DISABLE_YAW:
+#endif
 #if AP_INERTIALSENSOR_KILL_IMU_ENABLED
     case AUX_FUNC::KILL_IMU1:
     case AUX_FUNC::KILL_IMU2:
@@ -1295,11 +1297,7 @@ void RC_Channel::do_aux_function_fence(const AuxSwitchPos ch_flag)
 void RC_Channel::do_aux_function_clear_wp(const AuxSwitchPos ch_flag)
 {
     if (ch_flag == AuxSwitchPos::HIGH) {
-        AP_Mission *mission = AP::mission();
-        if (mission == nullptr) {
-            return;
-        }
-        mission->clear();
+        AP::mission().clear();
     }
 }
 #endif  // AP_MISSION_ENABLED
@@ -1407,11 +1405,7 @@ void RC_Channel::do_aux_function_mission_reset(const AuxSwitchPos ch_flag)
     if (ch_flag != AuxSwitchPos::HIGH) {
         return;
     }
-    AP_Mission *mission = AP::mission();
-    if (mission == nullptr) {
-        return;
-    }
-    mission->reset();
+    AP::mission().reset();
 }
 #endif
 
