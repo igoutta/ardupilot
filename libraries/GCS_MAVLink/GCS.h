@@ -36,7 +36,7 @@
 
 #ifndef HAL_GCS_ALLOW_PARAM_SET_DEFAULT
 #define HAL_GCS_ALLOW_PARAM_SET_DEFAULT 1
-#endif  // HAL_GCS_IGNORE_PARAM_SET_DEFAULT
+#endif  // HAL_GCS_ALLOW_PARAM_SET_DEFAULT
 
 // macros used to determine if a message will fit in the space available.
 
@@ -531,6 +531,7 @@ protected:
 
     // saveable rate of each stream
     AP_Int16        streamRates[NUM_STREAMS];
+    AP_Int32        devid;  // ID for device using this mavlink channel
 
     void handle_heartbeat(const mavlink_message_t &msg);
 

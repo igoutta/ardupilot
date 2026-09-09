@@ -150,9 +150,6 @@ bool AP_VideoTX::init(void)
         return false;
     }
 
-    // PARAMETER_CONVERSION - Added: Sept-2022
-    _options.convert_parameter_width(AP_PARAM_INT16);
-
     // find the index into the power table
     for (uint8_t i = 0; i < VTX_MAX_POWER_LEVELS; i++) {
         if (_power_mw <= _power_levels[i].mw) {

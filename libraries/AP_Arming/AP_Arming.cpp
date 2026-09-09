@@ -229,7 +229,8 @@ AP_Arming::AP_Arming()
 
 __INITFUNC__ void AP_Arming::init(void)
 {
-    // PARAM_CONVERSION - 4.7 CHECK -> SKIPCHK
+    // PARAMETER_CONVERSION - Added: Dec-2025 for ArduPilot-4.7
+    // ARMING_CHECK -> ARMING_SKIPCHK
 
     if (!checks_to_skip.configured()) {
         // new parameter is not configured (though it may be set non-zero in a
@@ -810,7 +811,7 @@ bool AP_Arming::hardware_safety_check(bool report)
 
       // check if safety switch has been pushed
       if (hal.util->safety_switch_state() == AP_HAL::Util::SAFETY_DISARMED) {
-          check_failed(Check::SWITCH, report, "Hardware safety switch");
+          check_failed(Check::SWITCH, report, "Safety Switch");
           return false;
       }
     }
@@ -984,6 +985,25 @@ bool AP_Arming::mission_checks(bool report)
             check_failed(Check::MISSION, report, "No rally library present");
             return false;
 #endif
+        }
+    }
+
+    // Check there are no zero altitude takeoffs
+    // Although technically valid in some very rare cases it's most likely that the user simply forgot to enter an altitude.
+    if (check_enabled(Check::MISSION)) {
+        const uint16_t num_commands = mission.num_commands();
+        for (uint16_t i = 1; i < num_commands; i++) {
+            if (!mission.is_takeoff_type_cmd(mission.get_command_id(i))) {
+                continue;
+            }
+            AP_Mission::Mission_Command cmd;
+            if (!mission.read_cmd_from_storage(i, cmd)) {
+                continue;
+            }
+            if (cmd.content.location.alt == 0) {
+                check_failed(Check::MISSION, report, "Mission: Zero takeoff altitude");
+                return false;
+            }
         }
     }
 
@@ -1976,6 +1996,14 @@ bool AP_Arming::disarm(const AP_Arming::Method method, bool do_disarm_checks)
         hal.rcout->force_safety_on();
     }
 #endif // HAL_HAVE_SAFETY_SWITCH
+
+#if AP_COMPASS_LEARN_COPY_FROM_EKF_ENABLED
+    // save any compass offsets the EKF has learned.  This must be done
+    // before the vehicle calls hal.util->set_soft_armed(false); once the
+    // EKF sees onGround it clears finalInflightMagInit and will no
+    // longer hand out learned offsets.
+    AP::compass().save_ekf_learned_offsets();
+#endif  // AP_COMPASS_LEARN_COPY_FROM_EKF_ENABLED
 
 #if HAL_GYROFFT_ENABLED
     AP_GyroFFT *fft = AP::fft();
