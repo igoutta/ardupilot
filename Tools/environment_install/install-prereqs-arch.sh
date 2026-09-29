@@ -1,16 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Arch Linux prerequisites for ArduPilot SITL and board builds. Twin of
+# install-prereqs-ubuntu.sh: same options (-y -q -s -d DIR), same layout, same
+# pip list; only the system part differs (pacman, uucp group, ccache layout).
+#
+# IMPORTANT, for whoever extends this: upstream's install-prereqs-ubuntu.sh
+# does more than these twins, and each item was left out for a reason that
+# was checked against the code, not assumed (sim project, 2026-09-29):
+#   - SFML/CSFML: only used when SITL is configured with --enable-sfml
+#     (OSD window, SFML joystick/audio); `sim compile` never passes it.
+#   - g++-arm-linux-gnueabihf + pkg-config-arm-linux-gnueabihf: firmware for
+#     Linux boards (Navio2, BBBmini...); ours are STM32/ChibiOS boards.
+#   - lcov, gcovr: C++ coverage in CI (Tools/scripts/run_coverage.py).
+#   - flake8, wsproto, tabulate: CI-only; nothing in Tools imports wsproto,
+#     tabulate only feeds the firmware size comparison scripts.
+#   - junitparser: only Tools/autotest/vehicle_test_suite.py. Add it the day
+#     the autotest framework is used (e.g. a `sim scenario` built on it).
+#   - valgrind, screen, astyle: debugging/formatting the firmware C++.
+#   - python-is-python3, libpython3-stdlib: no script in Tools has a plain
+#     `python` shebang any more; argparse is stdlib.
+#   - ppp: autotest's PPP network tests.
+#   - Bash/zsh completion (Tools/completion): cosmetic; add as a prompted
+#     config entry if wanted.
+#   - The Docker environment file and the SKIP_AP_*/DO_AP_* env toggles.
+#   - Reinstalling Pillow on plucky/questing: upstream's commit a6420430f0
+#     only says "somehow"; here Pillow is checked after pip and reinstalled
+#     only if `import PIL.Image` really fails.
+# Kept because the code needs it: psutil (sim_vehicle.py; optional, it falls
+# back to pkill), pygame-ce + pyyaml (MAVProxy's joystick module; pygame-ce
+# has wheels up to Python 3.15, pygame stops at 3.13), intelhex (waf checks
+# it in configure and needs it for the .hex with bootloader), ccache first in
+# PATH (waf only wires ccache by itself for QURT boards, boards.py:1527; for
+# STM32 and SITL it finds the compilers through PATH).
+
 # Configuration flags
 ASSUME_YES=false
 QUIET=false
+SKIP_SYSTEM=false
+TARGET_DIR=""
 
 # Parse command-line options
+#   -d DIR  set up another ArduPilot checkout (its .venv and submodules)
+#           instead of the one this script lives in
+#   -s      skip the system part (groups, pacman, ccache, ARM toolchain,
+#           shell config): only the checkout's .venv and submodules
 OPTIND=1
-while getopts "yq" opt; do
+while getopts "yqsd:" opt; do
     case "$opt" in
         y)  ASSUME_YES=true ;;
         q)  QUIET=true ;;
+        s)  SKIP_SYSTEM=true ;;
+        d)  TARGET_DIR="$OPTARG" ;;
         *)  exit 1 ;;
     esac
 done
@@ -24,26 +65,57 @@ case "$(basename "${SHELL:-}")" in
     *)    CONFIG_FILE=""              ;;
 esac
 
-# Development Packages
+# Development Packages.
+# No lib32-glibc: the ARM toolchain tarball is ELF 64-bit (checked with `file`),
+# and that package needs the multilib repository, which not every Arch has.
 BASE_PKGS=(base-devel gcc ccache git wget gsfonts tk grep tar)
 SITL_PKGS=(python-pip python-setuptools python-wheel python-numpy python-scipy opencv python-wxpython)
-PX4_PKGS=(lib32-glibc zip zlib ncurses)
-PYTHON_PKGS=(lxml pymavlink MAVProxy opencv-python pexpect argparse matplotlib pyparsing geocoder pyserial empy==3.3.4 dronecan packaging setuptools wheel)
+PX4_PKGS=(zip zlib ncurses)
+# psutil: sim_vehicle.py uses it to kill its children (optional: it falls back to
+# pkill). pygame-ce + pyyaml: MAVProxy's joystick module (pygame-ce, not pygame:
+# it ships wheels up to Python 3.15, pygame stops at 3.13). intelhex: waf checks
+# it in configure and needs it for the .hex with bootloader of board builds.
+PYTHON_PKGS=(lxml pymavlink MAVProxy opencv-python pexpect argparse "matplotlib<3.11" pyparsing geocoder pyserial "empy==3.3.4" dronecan packaging setuptools wheel psutil pygame-ce pyyaml intelhex)
 
-# GNU Toolchain for ARM Embedded Processors (see https://launchpad.net/gcc-arm-embedded/)
+# GNU Toolchain for ARM Embedded Processors (see https://launchpad.net/gcc-arm-embedded/).
+# ArduPilot ships it for x86_64 and aarch64.
 ARM_ROOT="gcc-arm-none-eabi-10-2020-q4-major"
-ARM_TARBALL="$ARM_ROOT-x86_64-linux.tar.bz2"
+case "$(uname -m)" in
+    x86_64)
+        ARM_TARBALL="$ARM_ROOT-x86_64-linux.tar.bz2"
+        ARM_TARBALL_CHECKSUM="21134caa478bbf5352e239fbc6e2da3038f8d2207e089efc96c3b55f1edcd618"
+        ;;
+    aarch64)
+        ARM_TARBALL="$ARM_ROOT-aarch64-linux.tar.bz2"
+        ARM_TARBALL_CHECKSUM="343d8c812934fe5a904c73583a91edd812b1ac20636eb52de04135bb0f5cf36a"
+        ;;
+    *)
+        ARM_TARBALL=""
+        ARM_TARBALL_CHECKSUM=""
+        ;;
+esac
 ARM_TARBALL_URL="https://firmware.ardupilot.org/Tools/STM32-tools/$ARM_TARBALL"
-ARM_TARBALL_CHECKSUM="21134caa478bbf5352e239fbc6e2da3038f8d2207e089efc96c3b55f1edcd618"
 
 # Main directories
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
-ARDUPILOT_ROOT="${SCRIPT_DIR%/Tools/environment_install}"
-ARDUPILOT_TOOLS_DIR="${SCRIPT_DIR%/environment_install}/autotest"
+if [[ -n "$TARGET_DIR" ]]; then
+    ARDUPILOT_ROOT=$(realpath "$TARGET_DIR")
+    if [[ ! -f "$ARDUPILOT_ROOT/Tools/autotest/sim_vehicle.py" ]]; then
+        echo "FATAL: $ARDUPILOT_ROOT is not an ArduPilot checkout" >&2
+        exit 1
+    fi
+else
+    ARDUPILOT_ROOT="${SCRIPT_DIR%/Tools/environment_install}"
+fi
+ARDUPILOT_TOOLS_DIR="$ARDUPILOT_ROOT/Tools/autotest"
 VENV_DIR="$ARDUPILOT_ROOT/.venv"
-ARM_TOOLCHAIN_DIR="/opt/$ARM_ROOT"
-ARM_TARBALL_PATH="/opt/$ARM_TARBALL"
-CCACHE_DIR="/usr/lib/ccache"
+# OPT_DIR is overridable so the script can be exercised without root.
+OPT_DIR="${OPT_DIR:-/opt}"
+ARM_TOOLCHAIN_DIR="$OPT_DIR/$ARM_ROOT"
+ARM_TARBALL_PATH="$OPT_DIR/${ARM_TARBALL:-none}"
+# Arch keeps the ccache compiler symlinks in /usr/lib/ccache/bin (that is where
+# the package puts gcc, g++, cc...), not in /usr/lib/ccache like Debian.
+CCACHE_DIR="/usr/lib/ccache/bin"
 
 # Helper functions
 function log() {
@@ -93,7 +165,9 @@ if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
     exit 1
 fi
 
-if [[ $EUID -eq 0 ]]; then
+if $SKIP_SYSTEM; then
+    SUDO=()
+elif [[ $EUID -eq 0 ]]; then
     SUDO=()
 elif command -v sudo >/dev/null 2>&1; then
     SUDO=(sudo)
@@ -113,7 +187,9 @@ fi
 
 # Main execution
 log "=== ArduPilot Development Environment Setup ==="
+log "Checkout: $ARDUPILOT_ROOT"
 
+if ! $SKIP_SYSTEM; then
 # User group setup.
 # $USER is not exported in every context (cron, CI, `env -i`), which would be
 # fatal under `set -u`. `id -nG` avoids a pipeline that `pipefail` can trip on.
@@ -136,6 +212,7 @@ if $ASSUME_YES || $QUIET; then
     PACMAN_OPTS+=(--noconfirm)
 fi
 "${SUDO[@]}" pacman -Syu "${PACMAN_OPTS[@]}" "${BASE_PKGS[@]}" "${SITL_PKGS[@]}" "${PX4_PKGS[@]}"
+fi
 
 # Python virtual environment setup
 if [[ ! -d "$VENV_DIR" ]]; then
@@ -164,6 +241,16 @@ fi
 "$VENV_DIR"/bin/python3 -m pip install "${PIP_OPTS[@]}" --upgrade pip
 "$VENV_DIR"/bin/python3 -m pip install "${PIP_OPTS[@]}" "${PYTHON_PKGS[@]}"
 
+# Pillow sanity check. The distro's PIL and pip's can end up mixed through
+# --system-site-packages ("_imaging" from one, the package from the other:
+# "Core version ... Pillow version" mismatch). Reinstall only if it really fails.
+if ! "$VENV_DIR"/bin/python3 -c "import PIL.Image" >/dev/null 2>&1; then
+    log "Pillow does not import in the venv; reinstalling it..."
+    "$VENV_DIR"/bin/python3 -m pip install "${PIP_OPTS[@]}" --force-reinstall pillow
+    "$VENV_DIR"/bin/python3 -c "import PIL.Image"
+fi
+
+if ! $SKIP_SYSTEM; then
 # CCache setup
 log "Configuring ccache symlinks for build optimizations..."
 for compiler in arm-none-eabi-g++ arm-none-eabi-gcc; do
@@ -174,8 +261,10 @@ done
 
 # ARM toolchain installation.
 # The whole block is skipped when the toolchain is already in place, so a
-# re-run does not re-download ~130 MB.
-if [[ ! -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
+# re-run does not re-download ~130-170 MB.
+if [[ -z "$ARM_TARBALL" ]]; then
+    log "ARM toolchain: no tarball for $(uname -m); skipping."
+elif [[ ! -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
     log "Setting up ARM toolchain..."
 
     # Download with verification
@@ -206,7 +295,7 @@ if [[ ! -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
     # Extraction. --checkpoint counts 512-byte records, so 2048 is one dot
     # per MiB extracted.
     log "Extracting toolchain..."
-    TAR_OPTS=(--extract --file="$ARM_TARBALL_PATH" --directory=/opt)
+    TAR_OPTS=(--extract --file="$ARM_TARBALL_PATH" --directory="$OPT_DIR")
     if ! $QUIET; then
         TAR_OPTS+=(--checkpoint=2048 --checkpoint-action=dot)
     fi
@@ -233,9 +322,13 @@ else
     log "ARM toolchain already present at $ARM_TOOLCHAIN_DIR"
 fi
 
-# Environment configuration
-CONFIG_ENTRIES=(
-    "export PATH=$ARM_TOOLCHAIN_DIR/bin:\$PATH|Add ARM toolchain to PATH"
+# Environment configuration. ccache first in PATH is what makes the symlinks
+# above take effect: waf finds arm-none-eabi-g++ and g++ through PATH.
+CONFIG_ENTRIES=("export PATH=$CCACHE_DIR:\$PATH|Put ccache first in PATH")
+if [[ -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
+    CONFIG_ENTRIES+=("export PATH=$ARM_TOOLCHAIN_DIR/bin:\$PATH|Add ARM toolchain to PATH")
+fi
+CONFIG_ENTRIES+=(
     "export PATH=$ARDUPILOT_TOOLS_DIR:\$PATH|Add ArduPilot test tools to PATH"
     "source $VENV_DIR/bin/activate|Auto-activate Python virtual environment"
 )
@@ -244,6 +337,7 @@ for entry in "${CONFIG_ENTRIES[@]}"; do
     IFS='|' read -r line prompt <<< "$entry"
     add_config_entry "$line" "$prompt"
 done
+fi
 
 # Repository submodules initialization
 log "Initializing repository submodules..."
@@ -256,6 +350,10 @@ git -C "$ARDUPILOT_ROOT" submodule update "${GIT_OPTS[@]}"
 # Final instructions
 log ""
 log "=== Setup complete ==="
+if $SKIP_SYSTEM; then
+    log "Python virtual environment: $VENV_DIR"
+    exit 0
+fi
 log "Recommended actions:"
 if [[ -n "$CONFIG_FILE" ]]; then
     log "1. Reload your shell config: source $CONFIG_FILE"
