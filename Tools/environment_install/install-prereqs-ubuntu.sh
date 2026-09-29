@@ -1,651 +1,406 @@
 #!/usr/bin/env bash
-echo "---------- $0 start ----------"
-set -e
-set -x
+set -euo pipefail
 
-if [ $EUID == 0 ]; then
-    echo "Please do not run this script as root; don't sudo it!"
-    exit 1
-fi
+# Ubuntu / Debian twin of install-prereqs-arch.sh: same options, same layout,
+# same promises. The system part uses apt; everything else is identical.
+#
+# IMPORTANT, for whoever extends this: upstream's install-prereqs-ubuntu.sh
+# does more than these twins, and each item was left out for a reason that
+# was checked against the code, not assumed (sim project, 2026-09-29):
+#   - SFML/CSFML: only used when SITL is configured with --enable-sfml
+#     (OSD window, SFML joystick/audio); `sim compile` never passes it.
+#   - g++-arm-linux-gnueabihf + pkg-config-arm-linux-gnueabihf: firmware for
+#     Linux boards (Navio2, BBBmini...); ours are STM32/ChibiOS boards.
+#   - lcov, gcovr: C++ coverage in CI (Tools/scripts/run_coverage.py).
+#   - flake8, wsproto, tabulate: CI-only; nothing in Tools imports wsproto,
+#     tabulate only feeds the firmware size comparison scripts.
+#   - junitparser: only Tools/autotest/vehicle_test_suite.py. Add it the day
+#     the autotest framework is used (e.g. a `sim scenario` built on it).
+#   - valgrind, screen, astyle: debugging/formatting the firmware C++.
+#   - python-is-python3, libpython3-stdlib: no script in Tools has a plain
+#     `python` shebang any more; argparse is stdlib.
+#   - ppp: autotest's PPP network tests.
+#   - Bash/zsh completion (Tools/completion): cosmetic; add as a prompted
+#     config entry if wanted.
+#   - The Docker environment file and the SKIP_AP_*/DO_AP_* env toggles.
+#   - Reinstalling Pillow on plucky/questing: upstream's commit a6420430f0
+#     only says "somehow"; here Pillow is checked after pip and reinstalled
+#     only if `import PIL.Image` really fails.
+# Kept because the code needs it: psutil (sim_vehicle.py; optional, it falls
+# back to pkill), pygame-ce + pyyaml (MAVProxy's joystick module; pygame-ce
+# has wheels up to Python 3.15, pygame stops at 3.13), intelhex (waf checks
+# it in configure and needs it for the .hex with bootloader), ccache first in
+# PATH (waf only wires ccache by itself for QURT boards, boards.py:1527; for
+# STM32 and SITL it finds the compilers through PATH).
 
-OPT="/opt"
-# Ardupilot Tools
-ARDUPILOT_TOOLS="Tools/autotest"
-
+# Configuration flags
 ASSUME_YES=false
 QUIET=false
-sep="##############################################"
+SKIP_SYSTEM=false
+TARGET_DIR=""
 
-OPTIND=1  # Reset in case getopts has been used previously in the shell.
-while getopts "yq" opt; do
+# Parse command-line options
+#   -d DIR  set up another ArduPilot checkout (its .venv and submodules)
+#           instead of the one this script lives in
+#   -s      skip the system part (groups, apt, ccache, ARM toolchain,
+#           shell config): only the checkout's .venv and submodules
+OPTIND=1
+while getopts "yqsd:" opt; do
     case "$opt" in
-        \?)
-            exit 1
-            ;;
-        y)  ASSUME_YES=true
-            ;;
-        q)  QUIET=true
-            ;;
+        y)  ASSUME_YES=true ;;
+        q)  QUIET=true ;;
+        s)  SKIP_SYSTEM=true ;;
+        d)  TARGET_DIR="$OPTARG" ;;
+        *)  exit 1 ;;
     esac
 done
 
-APT_GET="sudo apt-get"
-if $ASSUME_YES; then
-    APT_GET="$APT_GET --assume-yes"
-fi
-if $QUIET; then
-    APT_GET="$APT_GET -qq"
-fi
-
-# update apt package list
-$APT_GET update
-
-function package_is_installed() {
-    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -c "ok installed"
-}
-
-function heading() {
-    echo "$sep"
-    echo $*
-    echo "$sep"
-}
-
-# Install lsb-release as it is needed to check Ubuntu version
-if ! package_is_installed "lsb-release"; then
-    heading "Installing lsb-release"
-    $APT_GET install lsb-release
-    echo "Done!"
-fi
-
-# Checking Ubuntu release to adapt software version to install
-RELEASE_CODENAME=$(lsb_release -c -s)
-
-RELEASE_DISTRIBUTOR=$(lsb_release -i -s | tr '[:upper:]' '[:lower:]')
-case ${RELEASE_DISTRIBUTOR} in
-    elementary)
-        case ${RELEASE_CODENAME} in
-            jolnir)
-                RELEASE_CODENAME='focal'
-                ;;
-        esac
-        ;;
-    linuxmint)
-        # translate Mint-codenames to Ubuntu-codenames based on https://www.linuxmint.com/download_all.php
-        case ${RELEASE_CODENAME} in
-            zara)     ;&
-            zena)     ;&
-            wilma)    ;&
-            xia)      ;&
-            _LISTENDA)
-                RELEASE_CODENAME='noble'
-                ;;
-            vanessa)  ;&
-            vera)     ;&
-            victoria) ;&
-            virginia) ;&
-            _LISTENDB)
-                RELEASE_CODENAME='jammy'
-                ;;
-            una)      ;&
-            uma)      ;&
-            ulyssa)   ;&
-            ulyana)   ;&
-            _LISTENDC)
-                RELEASE_CODENAME='focal'
-                ;;
-            tricia)   ;&
-            tina)     ;&
-            tessa)    ;&
-            tara)     ;&
-            _LISTENDD)
-                RELEASE_CODENAME='bionic'
-                ;;
-            elsie)
-                RELEASE_CODENAME='bullseye'
-                ;;
-            *)
-                echo "Unable to map ${RELEASE_CODENAME} to an Ubuntu release.  Please patch this script and submit a pull request, or report at https://github.com/ArduPilot/ardupilot/issues"
-                exit 1
-        esac
-        ;;
+# Get configuration file with shell detection.
+# An empty CONFIG_FILE means "unsupported shell": print the lines for the user
+# instead of appending them somewhere they will never be read.
+case "$(basename "${SHELL:-}")" in
+    bash) CONFIG_FILE="$HOME/.bashrc" ;;
+    zsh)  CONFIG_FILE="$HOME/.zshrc"  ;;
+    *)    CONFIG_FILE=""              ;;
 esac
 
-PYTHON_V="python3"  # starting from ubuntu 20.04, python isn't symlink to default Python interpreter
-PIP=pip3
+# Development Packages.
+# python3-* from apt are the system copies every .venv sees through
+# --system-site-packages (wxPython above all: pip would build it for ~30 min).
+BASE_PKGS=(build-essential ccache g++ gawk git make wget zip)
+SITL_PKGS=(python3-dev python3-venv python3-pip python3-setuptools python3-wheel python3-numpy python3-scipy python3-opencv python3-wxgtk4.0 python3-tk libtool libtool-bin libxml2-dev libxslt1-dev xterm xfonts-base)
+PX4_PKGS=(zlib1g-dev libncurses-dev)
+# psutil: sim_vehicle.py uses it to kill its children (optional: it falls back to
+# pkill). pygame-ce + pyyaml: MAVProxy's joystick module (pygame-ce, not pygame:
+# it ships wheels up to Python 3.15, pygame stops at 3.13). intelhex: waf checks
+# it in configure and needs it for the .hex with bootloader of board builds.
+PYTHON_PKGS=(lxml pymavlink MAVProxy opencv-python pexpect argparse "matplotlib<3.11" pyparsing geocoder pyserial "empy==3.3.4" dronecan packaging setuptools wheel psutil pygame-ce pyyaml intelhex)
 
-case "${RELEASE_CODENAME}" in
-    bionic)   ;&
-    buster)   ;&
-    focal)    ;&
-    groovy)   ;&
-    lunar)    ;&
-    mantic)   ;&
-    bullseye) ;&
-    oracular) ;&
-    _LISTENDA)
-        echo "ArduPilot no longer supports developing on this operating system that has reached end of standard support."
-        exit 1
+# Releases whose package names above are known to be right. Derivatives that
+# set UBUNTU_CODENAME (Mint, Pop!_OS, elementary) are mapped through it.
+SUPPORTED_CODENAMES=(jammy noble plucky questing resolute bookworm trixie forky)
+
+# GNU Toolchain for ARM Embedded Processors (see https://launchpad.net/gcc-arm-embedded/).
+# ArduPilot ships it for x86_64 and aarch64 (Raspberry Pi, WSL on ARM).
+ARM_ROOT="gcc-arm-none-eabi-10-2020-q4-major"
+case "$(uname -m)" in
+    x86_64)
+        ARM_TARBALL="$ARM_ROOT-x86_64-linux.tar.bz2"
+        ARM_TARBALL_CHECKSUM="21134caa478bbf5352e239fbc6e2da3038f8d2207e089efc96c3b55f1edcd618"
         ;;
-
-    bookworm) ;&
-    trixie)   ;&
-    forky)    ;&
-    jammy)    ;&
-    noble)    ;&
-    plucky)   ;&
-    questing) ;&
-    resolute) ;&
-    _LISTENDB)
-        echo "${RELEASE_CODENAME} is supported"
+    aarch64)
+        ARM_TARBALL="$ARM_ROOT-aarch64-linux.tar.bz2"
+        ARM_TARBALL_CHECKSUM="343d8c812934fe5a904c73583a91edd812b1ac20636eb52de04135bb0f5cf36a"
         ;;
-
     *)
-        echo "This install script does not handle installation for ${RELEASE_CODENAME}"
-        exit 1
+        ARM_TARBALL=""
+        ARM_TARBALL_CHECKSUM=""
         ;;
 esac
+ARM_TARBALL_URL="https://firmware.ardupilot.org/Tools/STM32-tools/$ARM_TARBALL"
 
-if false; then :
-elif [ ${RELEASE_CODENAME} == 'trixie' ]; then
-    SITLFML_VERSION="2.6"
-    SITLCFML_VERSION="2.6"
-    PYTHON_V="python3"
-    PIP=pip3
-elif [ ${RELEASE_CODENAME} == 'bookworm' ]; then
-    SITLFML_VERSION="2.5"
-    SITLCFML_VERSION="2.5"
-    PYTHON_V="python3"
-    PIP=pip3
-elif [ ${RELEASE_CODENAME} == 'forky' ]; then
-    SITLFML_VERSION="3.1"
-    SITLCFML_VERSION="3.0"
-    PYTHON_V="python3"
-    PIP=pip3
-elif [ ${RELEASE_CODENAME} == 'jammy' ]; then
-    SITLFML_VERSION="2.5"
-    SITLCFML_VERSION="2.5"
-    PYTHON_V="python3"
-    PIP=pip3
-elif [ ${RELEASE_CODENAME} == 'noble' ]; then
-    SITLFML_VERSION="2.6"
-    SITLCFML_VERSION="2.6"
-    PYTHON_V="python3"
-    PIP=pip3
-elif [ ${RELEASE_CODENAME} == 'plucky' ]; then
-    SITLFML_VERSION="2.6"
-    SITLCFML_VERSION="2.6"
-    PYTHON_V="python3"
-    PIP="python3 -m pip"
-elif [ ${RELEASE_CODENAME} == 'questing' ]; then
-    SITLFML_VERSION="2.6"
-    SITLCFML_VERSION="2.6"
-    PYTHON_V="python3"
-    PIP="python3 -m pip"
-elif [ ${RELEASE_CODENAME} == 'resolute' ]; then
-    SITLFML_VERSION="3.0"
-    SITLCFML_VERSION="3.0"
-    PYTHON_V="python3"
-    PIP="python3 -m pip"
-else
-    # We assume APT based system, so let's try with apt-cache first.
-    SITLCFML_VERSION=$(apt-cache search -n '^libcsfml-audio' | cut -d" " -f1 | head -1 | grep -Eo '[+-]?[0-9]+([.][0-9]+)?')
-    SITLFML_VERSION=$(apt-cache search -n '^libsfml-audio' | cut -d" " -f1 | head -1 | grep -Eo '[+-]?[0-9]+([.][0-9]+)?')
-    # If we cannot retrieve the number with apt-cache, try a last time with dpkg-query
-    re='^[+-]?[0-9]+([.][0-9]+)?$'
-    if ! [[ $SITLCFML_VERSION =~ $re ]] || ! [[ $SITLFML_VERSION =~ $re ]] ; then
-        # Extract the floating point number that is the version of the libcsfml package.
-        SITLCFML_VERSION=$(dpkg-query --search libcsfml-audio | cut -d":" -f1 | grep libcsfml-audio | head -1 | grep -Eo '[+-]?[0-9]+([.][0-9]+)?')
-        # And same for libsfml-audio.
-        SITLFML_VERSION=$(dpkg-query --search libsfml-audio | cut -d":" -f1 | grep libsfml-audio | head -1 | grep -Eo '[+-]?[0-9]+([.][0-9]+)?')
-    fi
-fi
-
-# Check whether the specific ARM pkg-config package is available or whether we should emulate the effect of installing it.
-# Check if we need to manually install libtool-bin
-ARM_PKG_CONFIG_NOT_PRESENT=0
-if [ -z "$(apt-cache search -n '^pkg-config-arm-linux-gnueabihf')" ]; then
-    ARM_PKG_CONFIG_NOT_PRESENT=$(dpkg-query --search pkg-config-arm-linux-gnueabihf |& grep -c "dpkg-query:")
-fi
-if [ "$ARM_PKG_CONFIG_NOT_PRESENT" -eq 1 ]; then
-    INSTALL_PKG_CONFIG=""
-    # No need to install Ubuntu's pkg-config-arm-linux-gnueabihf, instead install the base pkg-config.
-    $APT_GET install pkg-config
-    if [ -f /usr/share/pkg-config-crosswrapper ]; then
-        # We are on non-Ubuntu so simulate effect of installing pkg-config-arm-linux-gnueabihf.
-        sudo ln -sf /usr/share/pkg-config-crosswrapper /usr/bin/arm-linux-gnueabihf-pkg-config
-    else
-        echo "Warning: unable to link to pkg-config-crosswrapper"
+# Main directories
+SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+if [[ -n "$TARGET_DIR" ]]; then
+    ARDUPILOT_ROOT=$(realpath "$TARGET_DIR")
+    if [[ ! -f "$ARDUPILOT_ROOT/Tools/autotest/sim_vehicle.py" ]]; then
+        echo "FATAL: $ARDUPILOT_ROOT is not an ArduPilot checkout" >&2
+        exit 1
     fi
 else
-    # Package is available so install it later.
-    INSTALL_PKG_CONFIG="pkg-config-arm-linux-gnueabihf"
+    ARDUPILOT_ROOT="${SCRIPT_DIR%/Tools/environment_install}"
 fi
+ARDUPILOT_TOOLS_DIR="$ARDUPILOT_ROOT/Tools/autotest"
+VENV_DIR="$ARDUPILOT_ROOT/.venv"
+# OPT_DIR and OS_RELEASE are overridable so the script can be exercised
+# without root and on another distro (see the tests in the sim project).
+OPT_DIR="${OPT_DIR:-/opt}"
+OS_RELEASE="${OS_RELEASE:-/etc/os-release}"
+ARM_TOOLCHAIN_DIR="$OPT_DIR/$ARM_ROOT"
+ARM_TARBALL_PATH="$OPT_DIR/${ARM_TARBALL:-none}"
+CCACHE_DIR="/usr/lib/ccache"
 
-# Lists of packages to install
-BASE_PKGS="build-essential ccache g++ gawk git make wget valgrind screen python3-pexpect astyle"
-PYTHON_PKGS="lxml pymavlink pyserial MAVProxy geocoder empy==3.3.4 ptyprocess dronecan"
-PYTHON_PKGS="$PYTHON_PKGS flake8 junitparser wsproto tabulate"
-
-# add some Python packages required for commonly-used MAVProxy modules and hex file generation:
-if [[ $SKIP_AP_EXT_ENV -ne 1 ]]; then
-    if [[ $SKIP_AP_GRAPHIC_ENV -ne 1 ]]; then
-        PYTHON_PKGS="$PYTHON_PKGS pygame"
-    fi
-    PYTHON_PKGS="$PYTHON_PKGS intelhex"
-fi
-ARM_LINUX_PKGS="g++-arm-linux-gnueabihf $INSTALL_PKG_CONFIG"
-# python-wxgtk packages are added to SITL_PKGS below
-
-if false ||
-   [ ${RELEASE_CODENAME} == 'trixie' ] ||
-   [ ${RELEASE_CODENAME} == 'bookworm' ] ||
-   [ ${RELEASE_CODENAME} == 'forky' ] ||
-   [ ${RELEASE_CODENAME} == 'noble' ] ||
-   [ ${RELEASE_CODENAME} == 'plucky' ] ||
-   [ ${RELEASE_CODENAME} == 'questing' ] ||
-   [ ${RELEASE_CODENAME} == 'resolute' ] ||
-   false; then
-    # on Ubuntu 23.04 Lunar (and presumably later releases), we install in venv, below
-    PYTHON_PKGS+=" numpy pyparsing psutil"
-    SITL_PKGS="python3-dev"
-else
-SITL_PKGS="libtool libxml2-dev libxslt1-dev ${PYTHON_V}-dev ${PYTHON_V}-pip ${PYTHON_V}-setuptools ${PYTHON_V}-numpy ${PYTHON_V}-pyparsing ${PYTHON_V}-psutil"
-fi
-
-# add some packages required for commonly-used MAVProxy modules:
-if [[ $SKIP_AP_GRAPHIC_ENV -ne 1 ]]; then
-    if false ||
-       [ ${RELEASE_CODENAME} == 'trixie' ] ||
-       [ ${RELEASE_CODENAME} == 'bookworm' ] ||
-       [ ${RELEASE_CODENAME} == 'forky' ] ||
-       [ ${RELEASE_CODENAME} == 'noble' ] ||
-       [ ${RELEASE_CODENAME} == 'plucky' ] ||
-       [ ${RELEASE_CODENAME} == 'questing' ] ||
-       [ ${RELEASE_CODENAME} == 'resolute' ] ||
-       false; then
-        PYTHON_PKGS+=" matplotlib scipy opencv-python pyyaml"
-        SITL_PKGS+=" xterm xfonts-base libcsfml-dev libcsfml-audio${SITLCFML_VERSION} libcsfml-dev libcsfml-graphics${SITLCFML_VERSION} libcsfml-network${SITLCFML_VERSION} libcsfml-system${SITLCFML_VERSION} libcsfml-window${SITLCFML_VERSION} libsfml-audio${SITLFML_VERSION} libsfml-dev libsfml-graphics${SITLFML_VERSION} libsfml-network${SITLFML_VERSION} libsfml-system${SITLFML_VERSION} libsfml-window${SITLFML_VERSION}"
-  else
-  SITL_PKGS="$SITL_PKGS xterm xfonts-base ${PYTHON_V}-matplotlib ${PYTHON_V}-serial ${PYTHON_V}-scipy ${PYTHON_V}-opencv libcsfml-dev libcsfml-audio${SITLCFML_VERSION} libcsfml-dev libcsfml-graphics${SITLCFML_VERSION} libcsfml-network${SITLCFML_VERSION} libcsfml-system${SITLCFML_VERSION} libcsfml-window${SITLCFML_VERSION} libsfml-audio${SITLFML_VERSION} libsfml-dev libsfml-graphics${SITLFML_VERSION} libsfml-network${SITLFML_VERSION} libsfml-system${SITLFML_VERSION} libsfml-window${SITLFML_VERSION} ${PYTHON_V}-yaml"
-  fi
-fi
-if [[ $SKIP_AP_COV_ENV -ne 1 ]]; then
-  # Coverage utilities
-  COVERAGE_PKGS="lcov gcovr"
-fi
-
-# ArduPilot official Toolchain for STM32 boards
-function install_arm_none_eabi_toolchain() {
-    # GNU Tools for ARM Embedded Processors
-    # (see https://launchpad.net/gcc-arm-embedded/)
-    ARM_ROOT="gcc-arm-none-eabi-10-2020-q4-major"
-    case $(uname -m) in
-        x86_64)
-            if [ ! -d $OPT/$ARM_ROOT ]; then
-                (
-                    cd $OPT
-                    heading "Installing toolchain for STM32 Boards"
-                    echo "Installing toolchain for STM32 Boards"
-                    echo "Downloading from ArduPilot server"
-                    sudo wget --progress=dot:giga https://firmware.ardupilot.org/Tools/STM32-tools/gcc-arm-none-eabi-10-2020-q4-major-x86_64-linux.tar.bz2
-                    echo "Installing..."
-                    sudo chmod -R 777 gcc-arm-none-eabi-10-2020-q4-major-x86_64-linux.tar.bz2
-                    sudo tar xjf gcc-arm-none-eabi-10-2020-q4-major-x86_64-linux.tar.bz2
-                    echo "... Cleaning"
-                    sudo rm gcc-arm-none-eabi-10-2020-q4-major-x86_64-linux.tar.bz2
-                )
-            fi
-            echo "Registering STM32 Toolchain for ccache"
-            sudo ln -s -f $CCACHE_PATH /usr/lib/ccache/arm-none-eabi-g++
-            sudo ln -s -f $CCACHE_PATH /usr/lib/ccache/arm-none-eabi-gcc
-            echo "Done!";;
-
-        aarch64)
-            if [ ! -d $OPT/$ARM_ROOT ]; then
-                (
-                    cd $OPT
-                    heading "Installing toolchain for STM32 Boards"
-                    echo "Installing toolchain for STM32 Boards"
-                    echo "Downloading from ArduPilot server"
-                    sudo wget --progress=dot:giga https://firmware.ardupilot.org/Tools/STM32-tools/gcc-arm-none-eabi-10-2020-q4-major-aarch64-linux.tar.bz2
-                    echo "Installing..."
-                    sudo chmod -R 777 gcc-arm-none-eabi-10-2020-q4-major-aarch64-linux.tar.bz2
-                    sudo tar xjf gcc-arm-none-eabi-10-2020-q4-major-aarch64-linux.tar.bz2
-                    echo "... Cleaning"
-                    sudo rm gcc-arm-none-eabi-10-2020-q4-major-aarch64-linux.tar.bz2
-                )
-            fi
-            echo "Registering STM32 Toolchain for ccache"
-            sudo ln -s -f $CCACHE_PATH /usr/lib/ccache/arm-none-eabi-g++
-            sudo ln -s -f $CCACHE_PATH /usr/lib/ccache/arm-none-eabi-gcc
-            echo "Done!";;
-    esac
+# Helper functions
+function log() {
+    $QUIET || echo "$@"
 }
 
 function maybe_prompt_user() {
     if $ASSUME_YES; then
         return 0
+    fi
+    local reply=""
+    # `read` returns non-zero on EOF (piped stdin, CI). Treat that as "no"
+    # rather than letting it bubble up as a failure.
+    read -rp "$1" reply || true
+    [[ $reply =~ ^[Yy]$ ]]
+}
+
+function add_config_entry() {
+    local line="$1" prompt="$2"
+
+    if [[ -z "$CONFIG_FILE" ]]; then
+        echo "Unsupported shell. Please add this line to your shell config yourself:"
+        echo "    $line"
+        return 0
+    fi
+
+    if grep -Fxq "$line" "$CONFIG_FILE" 2>/dev/null; then
+        log "Already configured: $prompt"
+        return 0
+    fi
+
+    if maybe_prompt_user "$prompt [N/y]?"; then
+        echo "$line" >> "$CONFIG_FILE"
+        log "Added to $CONFIG_FILE: $prompt"
     else
-        read -p "$1"
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            return 0
-        else
-            return 1
-        fi
+        log "Skipped: $prompt"
     fi
 }
 
-heading "Add user to dialout group to allow managing serial ports"
-sudo usermod -a -G dialout $USER
-echo "Done!"
+# The Ubuntu codename this system is based on: UBUNTU_CODENAME on Ubuntu and
+# its derivatives, VERSION_CODENAME on Debian. Empty when unknown.
+function release_codename() {
+    local UBUNTU_CODENAME="" VERSION_CODENAME=""
+    if [[ -r "$OS_RELEASE" ]]; then
+        # shellcheck source=/dev/null
+        source "$OS_RELEASE"
+    fi
+    echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+}
 
-# Add back python symlink to python interpreter on Ubuntu >= 20.04
-if false; then :
-elif [ ${RELEASE_CODENAME} == 'jammy' ]; then
-    BASE_PKGS+=" python-is-python3"
-    SITL_PKGS+=" libpython3-stdlib" # for argparse
-elif [ ${RELEASE_CODENAME} == 'trixie' ]; then
-    SITL_PKGS+=" libpython3-stdlib" # for argparse
-elif [ ${RELEASE_CODENAME} == 'bookworm' ]; then
-    SITL_PKGS+=" libpython3-stdlib" # for argparse
-elif [ ${RELEASE_CODENAME} == 'forky' ]; then
-    SITL_PKGS+=" libpython3-stdlib" # for argparse
-elif true &&
-     [ ${RELEASE_CODENAME} != 'noble' ] &&
-     [ ${RELEASE_CODENAME} != 'plucky' ] &&
-     [ ${RELEASE_CODENAME} != 'questing' ] &&
-     [ ${RELEASE_CODENAME} != 'resolute' ] &&
-     true; then
-    if apt-cache search python-argparse | grep argp; then
-        SITL_PKGS+=" python-argparse"
-    elif apt-cache search python3-argparse | grep argp; then
-        SITL_PKGS+=" python3-argparse"
+# Privilege escalation.
+# Nothing is hardcoded to `sudo`: run as root and no escalation is used at all,
+# otherwise take whichever tool the system actually has.
+if [[ $EUID -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    echo "FATAL: do not run this script with sudo." >&2
+    echo "Run it as your normal user. It elevates only the steps that need root," >&2
+    echo "so the venv, the git checkout and your shell config stay yours." >&2
+    exit 1
+fi
+
+if $SKIP_SYSTEM; then
+    SUDO=()
+elif [[ $EUID -eq 0 ]]; then
+    SUDO=()
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO=(sudo)
+elif command -v doas >/dev/null 2>&1; then
+    SUDO=(doas)
+elif command -v run0 >/dev/null 2>&1; then
+    SUDO=(run0)
+else
+    echo "FATAL: root privileges are required, but no sudo, doas or run0 was found." >&2
+    exit 1
+fi
+
+# Ask for the password once, up front, instead of at a random point mid-install.
+if [[ "${SUDO[0]-}" == "sudo" ]]; then
+    sudo -v
+fi
+
+# Main execution
+log "=== ArduPilot Development Environment Setup ==="
+log "Checkout: $ARDUPILOT_ROOT"
+
+if ! $SKIP_SYSTEM; then
+# Release check: only the package names depend on it.
+CODENAME=$(release_codename)
+if [[ " ${SUPPORTED_CODENAMES[*]} " != *" $CODENAME "* ]]; then
+    echo "FATAL: release '${CODENAME:-unknown}' is not handled (end of life, or not Ubuntu/Debian)." >&2
+    echo "Supported: ${SUPPORTED_CODENAMES[*]}. Install the packages by hand and rerun with -s." >&2
+    exit 1
+fi
+log "Release: $CODENAME"
+
+# User group setup.
+# $USER is not exported in every context (cron, CI, `env -i`), which would be
+# fatal under `set -u`. `id -nG` avoids a pipeline that `pipefail` can trip on.
+CURRENT_USER="${USER:-$(id -un)}"
+if [[ " $(id -nG "$CURRENT_USER") " != *" dialout "* ]]; then
+    log "Adding user to dialout group..."
+    "${SUDO[@]}" usermod -aG dialout "$CURRENT_USER"
+fi
+
+# System packages installation
+log "Installing system packages..."
+APT_OPTS=()
+APT_ENV=()
+# -y and -q both mean "do not stop to ask me anything".
+if $ASSUME_YES || $QUIET; then
+    APT_OPTS+=(--assume-yes)
+    APT_ENV=(env DEBIAN_FRONTEND=noninteractive)
+fi
+if $QUIET; then
+    APT_OPTS+=(-qq)
+fi
+"${SUDO[@]}" "${APT_ENV[@]}" apt-get update "${APT_OPTS[@]}"
+"${SUDO[@]}" "${APT_ENV[@]}" apt-get install "${APT_OPTS[@]}" "${BASE_PKGS[@]}" "${SITL_PKGS[@]}" "${PX4_PKGS[@]}"
+# xfonts-base needs the font cache rebuilt to be seen by xterm.
+if command -v fc-cache >/dev/null 2>&1; then
+    fc-cache >/dev/null 2>&1 || true
+fi
+
+# ModemManager and brltty probe every new serial device and can grab the flight
+# controller's USB port in the middle of a firmware upload. Upstream removes them
+# outright; here it asks (and -y means yes).
+for pkg in modemmanager brltty; do
+    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed"; then
+        if maybe_prompt_user "Remove $pkg (it can grab the flight controller's USB serial port) [N/y]?"; then
+            "${SUDO[@]}" "${APT_ENV[@]}" apt-get remove "${APT_OPTS[@]}" "$pkg"
+        fi
+    fi
+done
+fi
+
+# Python virtual environment setup
+if [[ ! -d "$VENV_DIR" ]]; then
+    log "Creating Python virtual environment..."
+    if ! python3 -m venv --system-site-packages "$VENV_DIR"; then
+        echo "FATAL: Failed to create virtual environment" >&2
+        echo "On Debian/Ubuntu this needs python3-venv: run this script once without -s." >&2
+        exit 1
     fi
 fi
 
-# Check for graphical package for MAVProxy
-if [[ $SKIP_AP_GRAPHIC_ENV -ne 1 ]]; then
-  if false; then :
-  elif [ ${RELEASE_CODENAME} == 'trixie' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-  elif [ ${RELEASE_CODENAME} == 'bookworm' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-    # see below
-  elif [ ${RELEASE_CODENAME} == 'forky' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-    # see below
-  elif [ ${RELEASE_CODENAME} == 'noble' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-    # see below
-  elif [ ${RELEASE_CODENAME} == 'plucky' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-    # see below
-  elif [ ${RELEASE_CODENAME} == 'questing' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-    # see below
-  elif [ ${RELEASE_CODENAME} == 'resolute' ]; then
-    SITL_PKGS+=" libgtk-3-dev libwxgtk3.2-dev "
-    # see below
-  elif apt-cache search python-wxgtk3.0 | grep wx; then
-      SITL_PKGS+=" python-wxgtk3.0"
-  elif apt-cache search python3-wxgtk4.0 | grep wx; then
-      # see below
-      :
-  else
-      # we only support back to trusty:
-      SITL_PKGS+=" python-wxgtk2.8"
-      SITL_PKGS+=" fonts-freefont-ttf libfreetype6-dev libjpeg8-dev libpng12-0 libportmidi-dev libsdl-image1.2-dev libsdl-mixer1.2-dev libsdl-ttf2.0-dev libsdl1.2-dev"  # for pygame
-  fi
-
-  if false; then :
-  elif false ||
-       [ ${RELEASE_CODENAME} == 'trixie' ] ||
-       [ ${RELEASE_CODENAME} == 'forky' ] ||
-       false; then
-      PYTHON_PKGS+=" opencv-python"
-      SITL_PKGS+=" python3-wxgtk4.0"
-      SITL_PKGS+=" fonts-freefont-ttf libfreetype6-dev libpng16-16 libportmidi-dev libsdl-image1.2-dev libsdl-mixer1.2-dev libsdl-ttf2.0-dev libsdl1.2-dev"  # for pygame
-  elif [ ${RELEASE_CODENAME} == 'bookworm' ]; then
-      PYTHON_PKGS+=" opencv-python"
-      SITL_PKGS+=" python3-wxgtk4.0"
-      SITL_PKGS+=" fonts-freefont-ttf libfreetype6-dev libpng16-16 libportmidi-dev libsdl-image1.2-dev libsdl-mixer1.2-dev libsdl-ttf2.0-dev libsdl1.2-dev"  # for pygame
-  elif false ||
-       [ ${RELEASE_CODENAME} == 'noble' ] ||
-       [ ${RELEASE_CODENAME} == 'plucky' ] ||
-       [ ${RELEASE_CODENAME} == 'questing' ] ||
-       [ ${RELEASE_CODENAME} == 'resolute' ] ||
-       false; then
-      PYTHON_PKGS+=" wxpython opencv-python"
-      SITL_PKGS+=" python3-wxgtk4.0"
-      SITL_PKGS+=" fonts-freefont-ttf libfreetype6-dev libpng16-16 libportmidi-dev libsdl-image1.2-dev libsdl-mixer1.2-dev libsdl-ttf2.0-dev libsdl1.2-dev"  # for pygame
-  elif [ ${RELEASE_CODENAME} == 'jammy' ]; then
-    SITL_PKGS+=" python3-wxgtk4.0"
-    SITL_PKGS+=" fonts-freefont-ttf libfreetype6-dev libpng16-16 libportmidi-dev libsdl-image1.2-dev libsdl-mixer1.2-dev libsdl-ttf2.0-dev libsdl1.2-dev"  # for pygame
-  fi
-fi
-
-# Check if we need to manually install realpath
-RP=$(apt-cache search -n '^realpath$')
-if [ -n "$RP" ]; then
-    BASE_PKGS+=" realpath"
-fi
-
-# Check if we need to manually install libtool-bin
-LBTBIN=$(apt-cache search -n '^libtool-bin')
-if [ -n "$LBTBIN" ]; then
-    SITL_PKGS+=" libtool-bin"
-fi
-
-SITL_PKGS+=" ppp"
-
-# Install all packages
-$APT_GET install $BASE_PKGS $SITL_PKGS $PX4_PKGS $ARM_LINUX_PKGS $COVERAGE_PKGS
-
-if [[ $SKIP_AP_GRAPHIC_ENV -ne 1 ]]; then
-    # If xfonts-base was just installed, you need to rebuild the font information cache.
-    # https://discuss.ardupilot.org/t/using-the-gdb-window-on-a-high-dpi-display/128150/2
-    fc-cache
-fi
-
-heading "Check if we are inside docker environment..."
-IS_DOCKER=false
-if [[ ${AP_DOCKER_BUILD:-0} -eq 1 ]] || [[ -f /.dockerenv ]] || grep -Eq '(lxc|docker)' /proc/1/cgroup ; then
-    IS_DOCKER=true
-fi
-echo "Done!"
-
-SHELL_LOGIN=".profile"
-if $IS_DOCKER; then
-    echo "Inside docker, we add the tools path into .bashrc directly"
-    SHELL_LOGIN=".ardupilot_env"
-    echo "# ArduPilot env file. Need to be loaded by your Shell." > ~/$SHELL_LOGIN
-fi
-
-SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
-ARDUPILOT_ROOT=$(realpath "$SCRIPT_DIR/../../")
-
-PIP_USER_ARGUMENT="--user"
-
-# create a Python venv on more recent releases:
-if false ||
-     [ ${RELEASE_CODENAME} == 'bookworm' ] ||
-     [ ${RELEASE_CODENAME} == 'trixie' ] ||
-     [ ${RELEASE_CODENAME} == 'forky' ] ||
-     [ ${RELEASE_CODENAME} == 'noble' ] ||
-     [ ${RELEASE_CODENAME} == 'plucky' ] ||
-     [ ${RELEASE_CODENAME} == 'questing' ] ||
-     [ ${RELEASE_CODENAME} == 'resolute' ] ||
-     false; then
-    $APT_GET install python3-venv
-
-    # Check if venv already exists in ARDUPILOT_ROOT (check both venv-ardupilot and venv)
-    VENV_PATH=""
-    if [ -d "$ARDUPILOT_ROOT/venv-ardupilot" ]; then
-        VENV_PATH="$ARDUPILOT_ROOT/venv-ardupilot"
-        echo "Found existing venv at $VENV_PATH"
-    elif [ -d "$ARDUPILOT_ROOT/venv" ]; then
-        VENV_PATH="$ARDUPILOT_ROOT/venv"
-        echo "Found existing venv at $VENV_PATH"
-    elif [ -d "$ARDUPILOT_ROOT/.venv" ]; then
-        VENV_PATH="$ARDUPILOT_ROOT/.venv"
-        echo "Found existing venv at $VENV_PATH"
-    else
-        VENV_PATH="$HOME/venv-ardupilot"
-        echo "Creating new venv at $VENV_PATH"
-        python3 -m venv --system-site-packages "$VENV_PATH"
-    fi
-
-    SOURCE_LINE="source $VENV_PATH/bin/activate"
-
-    # activate it:
-    $SOURCE_LINE
-    PIP_USER_ARGUMENT=""
-
-    if [[ -z "${DO_PYTHON_VENV_ENV}" ]] && maybe_prompt_user "Make ArduPilot venv default for python [N/y]?\nThis means that any terminal will open and load ArduPilot venv" ; then
-        DO_PYTHON_VENV_ENV=1
-    fi
-
-    if [[ $DO_PYTHON_VENV_ENV -eq 1 ]]; then
-        echo $SOURCE_LINE >> ~/$SHELL_LOGIN
-    else
-        echo "Please use \`$SOURCE_LINE\` to activate the ArduPilot venv"
+# Keep the venv out of `git status` without touching the tracked .gitignore.
+if [[ -d "$ARDUPILOT_ROOT/.git" ]]; then
+    GIT_EXCLUDE="$ARDUPILOT_ROOT/.git/info/exclude"
+    mkdir -p "$(dirname "$GIT_EXCLUDE")"
+    if ! grep -Fxq '.venv/' "$GIT_EXCLUDE" 2>/dev/null; then
+        echo '.venv/' >> "$GIT_EXCLUDE"
     fi
 fi
 
-# try update packaging, setuptools and wheel before installing pip package that may need compilation
-SETUPTOOLS="setuptools"
-$PIP install $PIP_USER_ARGUMENT --upgrade pip packaging $SETUPTOOLS wheel
+# Install Python packages within the virtual environment
+log "Installing Python packages..."
+PIP_OPTS=(-U --no-warn-script-location)
+if $QUIET; then
+    PIP_OPTS+=(-q)
+fi
+"$VENV_DIR"/bin/python3 -m pip install "${PIP_OPTS[@]}" --upgrade pip
+"$VENV_DIR"/bin/python3 -m pip install "${PIP_OPTS[@]}" "${PYTHON_PKGS[@]}"
 
-if [ "$GITHUB_ACTIONS" == "true" ]; then
-    PIP_USER_ARGUMENT+=" --progress-bar off"
+# Pillow sanity check. The distro's PIL and pip's can end up mixed through
+# --system-site-packages ("_imaging" from one, the package from the other:
+# "Core version ... Pillow version" mismatch). Reinstall only if it really fails.
+if ! "$VENV_DIR"/bin/python3 -c "import PIL.Image" >/dev/null 2>&1; then
+    log "Pillow does not import in the venv; reinstalling it..."
+    "$VENV_DIR"/bin/python3 -m pip install "${PIP_OPTS[@]}" --force-reinstall pillow
+    "$VENV_DIR"/bin/python3 -c "import PIL.Image"
 fi
 
-if false ||
-   [ ${RELEASE_CODENAME} == 'trixie' ] ||
-   [ ${RELEASE_CODENAME} == 'bookworm' ] ||
-   [ ${RELEASE_CODENAME} == 'forky' ] ||
-   [ ${RELEASE_CODENAME} == 'noble' ] ||
-   [ ${RELEASE_CODENAME} == 'plucky' ] ||
-   [ ${RELEASE_CODENAME} == 'questing' ] ||
-   [ ${RELEASE_CODENAME} == 'resolute' ] ||
-   false; then
-    # must do this ahead of wxPython pip3 run :-/
-    $PIP install $PIP_USER_ARGUMENT --upgrade attrdict3
-fi
-
-# install Python packages one-at-a-time so it is clear which package
-# is causing problems:
-for PACKAGE in $PYTHON_PKGS; do
-    if [ "$PACKAGE" == "wxpython" ]; then
-        echo "##### $PACKAGE takes a *VERY* long time to install (~30 minutes).  Be patient."
-        # Use wheel repository for specific supported Ubuntu releases only
-        case ${RELEASE_CODENAME} in
-            jammy)
-                echo "##### Adding wxpython wheel repository for faster installation"
-                WXPYTHON_WHEEL_REPO="https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-22.04"
-                time $PIP install $PIP_USER_ARGUMENT --upgrade --find-links $WXPYTHON_WHEEL_REPO $PACKAGE
-                ;;
-            noble)
-                echo "##### Adding wxpython wheel repository for faster installation"
-                WXPYTHON_WHEEL_REPO="https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-24.04"
-                time $PIP install $PIP_USER_ARGUMENT --upgrade --find-links $WXPYTHON_WHEEL_REPO $PACKAGE
-                ;;
-            *)
-                echo "##### Installing wxpython from PyPI (no specific wheel repository for this release)"
-                time $PIP install $PIP_USER_ARGUMENT --upgrade $PACKAGE
-                ;;
-        esac
-    else
-        time $PIP install $PIP_USER_ARGUMENT --upgrade $PACKAGE
+if ! $SKIP_SYSTEM; then
+# CCache setup
+log "Configuring ccache symlinks for build optimizations..."
+for compiler in arm-none-eabi-g++ arm-none-eabi-gcc; do
+    if [[ ! -e "$CCACHE_DIR/$compiler" ]]; then
+        "${SUDO[@]}" ln -sf /usr/bin/ccache "$CCACHE_DIR/$compiler"
     fi
 done
 
-# somehow Plucky really wants Pillow reinstalled or MAVProxy's map
-# won't load (version mismatch between "Core" and "Pillow")
-if false || \
-        [ ${RELEASE_CODENAME} == 'plucky' ] || \
-        [ ${RELEASE_CODENAME} == 'questing' ] || \
-        false; then
-    $PIP install --force-reinstall pillow
-fi
+# ARM toolchain installation.
+# The whole block is skipped when the toolchain is already in place, so a
+# re-run does not re-download ~130-170 MB.
+if [[ -z "$ARM_TARBALL" ]]; then
+    log "ARM toolchain: no tarball for $(uname -m); skipping."
+    log "See https://firmware.ardupilot.org/Tools/STM32-tools/ for what is available."
+elif [[ ! -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
+    log "Setting up ARM toolchain..."
 
-if [[ -z "${DO_AP_STM_ENV}" ]] && maybe_prompt_user "Install ArduPilot STM32 toolchain [N/y]?" ; then
-    DO_AP_STM_ENV=1
-fi
-
-heading "Removing modemmanager and brltty package that could conflict with firmware uploading"
-if package_is_installed "modemmanager"; then
-    $APT_GET remove modemmanager
-fi
-if package_is_installed "brltty"; then
-    $APT_GET remove brltty
-fi
-echo "Done!"
-
-CCACHE_PATH=$(which ccache)
-if [[ $DO_AP_STM_ENV -eq 1 ]]; then
-  install_arm_none_eabi_toolchain
-fi
-
-heading "Adding ArduPilot Tools to environment"
-
-if [[ $DO_AP_STM_ENV -eq 1 ]]; then
-exportline="export PATH=$OPT/$ARM_ROOT/bin:\$PATH";
-grep -Fxq "$exportline" ~/$SHELL_LOGIN 2>/dev/null || {
-    if maybe_prompt_user "Add $OPT/$ARM_ROOT/bin to your PATH [N/y]?" ; then
-        echo "$exportline" >> ~/$SHELL_LOGIN
-        eval "$exportline"
-    else
-        echo "Skipping adding $OPT/$ARM_ROOT/bin to PATH."
+    # Download with verification
+    if [[ ! -f "$ARM_TARBALL_PATH" ]] || \
+       [[ $(sha256sum "$ARM_TARBALL_PATH" | awk '{print $1}') != "$ARM_TARBALL_CHECKSUM" ]]; then
+        log "Downloading ARM toolchain..."
+        WGET_OPTS=(-O "$ARM_TARBALL_PATH")
+        if $QUIET; then
+            WGET_OPTS+=(--quiet)
+        else
+            WGET_OPTS+=(--progress=dot:giga)
+        fi
+        if ! "${SUDO[@]}" wget "${WGET_OPTS[@]}" "$ARM_TARBALL_URL"; then
+            echo "FATAL: Unable to download the toolchain tarball!" >&2
+            "${SUDO[@]}" rm -f "$ARM_TARBALL_PATH"
+            exit 1
+        fi
     fi
-}
-fi
 
-exportline2="export PATH=\"$ARDUPILOT_ROOT/$ARDUPILOT_TOOLS:\"\$PATH";
-grep -Fxq "$exportline2" ~/$SHELL_LOGIN 2>/dev/null || {
-    if maybe_prompt_user "Add $ARDUPILOT_ROOT/$ARDUPILOT_TOOLS to your PATH [N/y]?" ; then
-        echo "$exportline2" >> ~/$SHELL_LOGIN
-        eval "$exportline2"
-    else
-        echo "Skipping adding $ARDUPILOT_ROOT/$ARDUPILOT_TOOLS to PATH."
+    # Post-download verification
+    ACTUAL_CHECKSUM=$(sha256sum "$ARM_TARBALL_PATH" | awk '{print $1}')
+    if [[ "$ACTUAL_CHECKSUM" != "$ARM_TARBALL_CHECKSUM" ]]; then
+        echo "FATAL: Checksum mismatch after download!" >&2
+        "${SUDO[@]}" rm -f "$ARM_TARBALL_PATH"
+        exit 1
     fi
-}
 
-if [[ $SKIP_AP_COMPLETION_ENV -ne 1 ]]; then
-exportline3="source \"$ARDUPILOT_ROOT/Tools/completion/completion.bash\"";
-grep -Fxq "$exportline3" ~/$SHELL_LOGIN 2>/dev/null || {
-    if maybe_prompt_user "Add ArduPilot Bash Completion to your bash shell [N/y]?" ; then
-        echo "$exportline3" >> ~/.bashrc
-        eval "$exportline3"
-    else
-        echo "Skipping adding ArduPilot Bash Completion."
+    # Extraction. --checkpoint counts 512-byte records, so 2048 is one dot
+    # per MiB extracted.
+    log "Extracting toolchain..."
+    TAR_OPTS=(--extract --file="$ARM_TARBALL_PATH" --directory="$OPT_DIR")
+    if ! $QUIET; then
+        TAR_OPTS+=(--checkpoint=2048 --checkpoint-action=dot)
     fi
-}
-fi
+    "${SUDO[@]}" tar "${TAR_OPTS[@]}"
+    $QUIET || echo
 
-exportline4="export PATH=/usr/lib/ccache:\$PATH";
-grep -Fxq "$exportline4" ~/$SHELL_LOGIN 2>/dev/null || {
-    if maybe_prompt_user "Append CCache to your PATH [N/y]?" ; then
-        echo "$exportline4" >> ~/$SHELL_LOGIN
-        eval "$exportline4"
-    else
-        echo "Skipping appending CCache to PATH."
+    # Extraction validation
+    if [[ ! -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
+        echo "FATAL: Extraction failed - invalid tarball structure" >&2
+        exit 1
     fi
-}
-echo "Done!"
 
-if [[ $SKIP_AP_GIT_CHECK -ne 1 ]]; then
-  if [ -d ".git" ]; then
-    heading "Update git submodules"
-    cd "$ARDUPILOT_ROOT"
-    git submodule update --init --recursive
-    echo "Done!"
-  fi
+    # Validate ARM toolchain functionality.
+    # a+rX sets execute on directories and on files that are already
+    # executable, unlike a blanket 755.
+    "${SUDO[@]}" chmod -R a+rX "$ARM_TOOLCHAIN_DIR"
+    if ! "$ARM_TOOLCHAIN_DIR/bin/arm-none-eabi-gcc" --version &>/dev/null; then
+        echo "FATAL: ARM toolchain failed to run" >&2
+        exit 1
+    fi
+    log "ARM toolchain installed!"
+    "${SUDO[@]}" rm -f "$ARM_TARBALL_PATH"
+else
+    log "ARM toolchain already present at $ARM_TOOLCHAIN_DIR"
 fi
 
-if $IS_DOCKER; then
-    echo "Finalizing ArduPilot env for Docker"
-    echo "source ~/.ardupilot_env">> ~/.bashrc
+# Environment configuration. /usr/lib/ccache first in PATH is what makes the
+# ccache symlinks above (and Debian's own gcc/g++ ones) take effect.
+CONFIG_ENTRIES=("export PATH=$CCACHE_DIR:\$PATH|Put ccache first in PATH")
+if [[ -d "$ARM_TOOLCHAIN_DIR/bin" ]]; then
+    CONFIG_ENTRIES+=("export PATH=$ARM_TOOLCHAIN_DIR/bin:\$PATH|Add ARM toolchain to PATH")
+fi
+CONFIG_ENTRIES+=(
+    "export PATH=$ARDUPILOT_TOOLS_DIR:\$PATH|Add ArduPilot test tools to PATH"
+    "source $VENV_DIR/bin/activate|Auto-activate Python virtual environment"
+)
+
+for entry in "${CONFIG_ENTRIES[@]}"; do
+    IFS='|' read -r line prompt <<< "$entry"
+    add_config_entry "$line" "$prompt"
+done
 fi
 
-echo "---------- $0 end ----------"
+# Repository submodules initialization
+log "Initializing repository submodules..."
+GIT_OPTS=(--init --recursive)
+if $QUIET; then
+    GIT_OPTS+=(--quiet)
+fi
+git -C "$ARDUPILOT_ROOT" submodule update "${GIT_OPTS[@]}"
+
+# Final instructions
+log ""
+log "=== Setup complete ==="
+if $SKIP_SYSTEM; then
+    log "Python virtual environment: $VENV_DIR"
+    exit 0
+fi
+log "Recommended actions:"
+if [[ -n "$CONFIG_FILE" ]]; then
+    log "1. Reload your shell config: source $CONFIG_FILE"
+else
+    log "1. Add the lines printed above to your shell config"
+fi
+log "2. Verify ARM toolchain in environment: which arm-none-eabi-gcc"
+log "3. Activate Python virtual environment: source $VENV_DIR/bin/activate"
+log "4. Log out and back in for group changes to take effect"
