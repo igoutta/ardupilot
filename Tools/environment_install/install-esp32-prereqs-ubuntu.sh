@@ -1,7 +1,5 @@
 #!/bin/bash
-
-set -e
-set -x
+set -euo pipefail
 
 sudo apt-get install -y git wget flex bison gperf cmake ninja-build ccache libffi-dev libssl-dev dfu-util
 ./Tools/scripts/esp32_get_idf.sh

@@ -1,7 +1,5 @@
 #!/bin/bash
-
-set -e
-set -x
+set -euo pipefail
 
 EMSCRIPTEN_VERSION=${EMSCRIPTEN_VERSION:-6.0.8}
 EMSDK_ROOT=${EMSDK_ROOT:-$HOME/emsdk}

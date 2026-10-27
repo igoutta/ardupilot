@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
 echo "---------- $0 start ----------"
-set -e
-set -x
+set -eu
 
 echo "==================================================================="
 echo "Warning: This script is not fully tested. Please report any issues."
